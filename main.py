@@ -19,6 +19,7 @@ from portfolio_calculator import PortfolioCalculator
 from price_updater import smart_market_update
 from utils.common import record_system_event, update_system_event
 from api_clients.market_data_manager import MarketDataManager
+from data_consistency_monitor import DataConsistencyMonitor
 import math
 import logging
 import json
@@ -1755,4 +1756,41 @@ async def get_table_details(table_name: str, limit: int = 10, current_user: dict
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch table details: {str(e)}"
+        )
+# Add these endpoints to your FastAPI app
+@app.get("/admin/data-consistency/check")
+async def check_data_consistency(current_user: dict = Depends(get_current_user)):
+    """Run a data consistency check and return the results"""
+    try:
+        monitor = DataConsistencyMonitor()
+        results = await monitor.check_data_consistency()
+        return {
+            "message": "Data consistency check completed",
+            "issues_count": results["issues_count"],
+            "results": results
+        }
+    except Exception as e:
+        logger.error(f"Error checking data consistency: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to check data consistency: {str(e)}"
+        )
+
+@app.post("/admin/data-consistency/fix")
+async def fix_data_consistency(current_user: dict = Depends(get_current_user)):
+    """Attempt to automatically fix common data consistency issues"""
+    try:
+        monitor = DataConsistencyMonitor()
+        fix_results = await monitor.fix_common_issues()
+        return {
+            "message": "Data consistency fixes completed",
+            "fixed_count": fix_results["total_fixed"],
+            "unfixable_count": len(fix_results["unfixable_issues"]),
+            "results": fix_results
+        }
+    except Exception as e:
+        logger.error(f"Error fixing data consistency issues: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fix data consistency issues: {str(e)}"
         )

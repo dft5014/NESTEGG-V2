@@ -9,6 +9,7 @@ import aiohttp
 import pandas as pd
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
+import pytz
 import yfinance as yf
 
 from .data_source_interface import MarketDataSource
@@ -51,35 +52,55 @@ class YahooFinanceClient(MarketDataSource):
         try:
             # Use a separate thread for the yfinance API call
             loop = asyncio.get_event_loop()
-            ticker_data = await loop.run_in_executor(
-                None, 
-                lambda: yf.Ticker(ticker)
-            )
             
-            # Get latest price data
-            history = await loop.run_in_executor(
-                None,
-                lambda: ticker_data.history(period="1d")
-            )
+            try:
+                # Attempt to get ticker data with timeout
+                ticker_data = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: yf.Ticker(ticker)),
+                    timeout=15  # 15 second timeout
+                )
+                
+                # Get price data with timeout
+                price_data = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: ticker_data.history(period="1d")),
+                    timeout=15  # 15 second timeout
+                )
+                
+                if price_data.empty:
+                    logger.warning(f"No price data available for {ticker}")
+                    return None
+                
+                # Get the latest price
+                latest_price = price_data['Close'].iloc[-1]
+                
+                # Get the timestamp in Eastern Time
+                price_time = price_data.index[-1]
+                eastern = pytz.timezone('US/Eastern')
+                price_time_et = price_time.astimezone(eastern)
+                
+                # Format time string for display
+                price_time_str = price_time_et.strftime("%Y-%m-%d %I:%M:%S %p %Z")
+                
+                return {
+                    "price": latest_price,
+                    "timestamp": datetime.now(),
+                    "price_timestamp": price_time_et,
+                    "price_timestamp_str": price_time_str,
+                    "volume": price_data['Volume'].iloc[-1] if 'Volume' in price_data else None,
+                    "source": self.source_name
+                }
             
-            if history.empty:
-                logger.warning(f"No data available for {ticker}")
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout when fetching {ticker} from Yahoo Finance")
                 return None
-            
-            # Get the latest price from history
-            latest_price = history["Close"].iloc[-1]
-            timestamp = history.index[-1]
-            
-            return {
-                "price": float(latest_price),
-                "timestamp": timestamp.to_pydatetime(),
-                "volume": int(history["Volume"].iloc[-1]) if "Volume" in history else None,
-                "source": self.source_name
-            }
-            
+                
         except Exception as e:
-            logger.error(f"Error getting data for {ticker}: {str(e)}")
-            return None
+            if "Symbol not found" in str(e) or "not found or invalid" in str(e):
+                logger.warning(f"Ticker {ticker} not found on Yahoo Finance: {str(e)}")
+                return {"not_found": True, "source": self.source_name}
+            else:
+                logger.error(f"Error getting price for {ticker} from Yahoo Finance: {str(e)}")
+                return None
     
     async def get_batch_prices(self, tickers: List[str], max_batch_size: int = 100) -> Dict[str, Dict[str, Any]]:
         """
@@ -178,39 +199,73 @@ class YahooFinanceClient(MarketDataSource):
         try:
             # Use a separate thread for the yfinance API call
             loop = asyncio.get_event_loop()
-            ticker_data = await loop.run_in_executor(
-                None, 
-                lambda: yf.Ticker(ticker)
-            )
             
-            # Get company info
-            info = await loop.run_in_executor(
-                None,
-                lambda: ticker_data.info
-            )
-            
-            if not info:
-                logger.warning(f"No company info available for {ticker}")
+            try:
+                # Attempt to get ticker data with timeout
+                ticker_data = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: yf.Ticker(ticker)),
+                    timeout=15  # 15 second timeout
+                )
+                
+                # Get company info with timeout
+                info = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: ticker_data.info),
+                    timeout=15  # 15 second timeout
+                )
+                
+                if not info or len(info) <= 1:  # Empty dict or minimal info indicates ticker not found
+                    logger.warning(f"Ticker {ticker} not found on Yahoo Finance")
+                    return {"not_found": True, "source": self.source_name}
+                    
+                # Extract relevant fields - keeping all the original fields exactly as they were
+                return {
+                    "company_name": info.get("shortName") or info.get("longName"),
+                    "sector": info.get("sector"),
+                    "industry": info.get("industry"),
+                    "market_cap": info.get("marketCap"),
+                    "pe_ratio": info.get("trailingPE"),
+                    "dividend_yield": info.get("dividendYield"),
+                    "dividend_rate": info.get("dividendRate"),
+                    "eps": info.get("trailingEPS"),
+                    "avg_volume": info.get("averageVolume"),
+                    "source": self.source_name
+                }
+                
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout when fetching {ticker} from Yahoo Finance")
                 return None
                 
-            # Extract relevant fields
-            return {
-                "company_name": info.get("shortName") or info.get("longName"),
-                "sector": info.get("sector"),
-                "industry": info.get("industry"),
-                "market_cap": info.get("marketCap"),
-                "pe_ratio": info.get("trailingPE"),
-                "dividend_yield": info.get("dividendYield"),
-                "dividend_rate": info.get("dividendRate"),
-                "eps": info.get("trailingEPS"),
-                "avg_volume": info.get("averageVolume"),
-                "source": self.source_name
-            }
+        except KeyError as e:
+            # This often happens when the ticker exists but data is incomplete
+            logger.warning(f"KeyError for {ticker} from Yahoo Finance: {str(e)}")
+            
+            # If we have a minimal response, return what we can
+            if 'ticker_data' in locals() and hasattr(ticker_data, 'info'):
+                info = ticker_data.info
+                return {
+                    "company_name": info.get("shortName") or info.get("longName"),
+                    "sector": info.get("sector"),
+                    "industry": info.get("industry"),
+                    "market_cap": info.get("marketCap"),
+                    "pe_ratio": info.get("trailingPE"),
+                    "dividend_yield": info.get("dividendYield"),
+                    "dividend_rate": info.get("dividendRate"),
+                    "eps": info.get("trailingEPS"),
+                    "avg_volume": info.get("averageVolume"),
+                    "source": self.source_name
+                }
+            return None
             
         except Exception as e:
-            logger.error(f"Error getting company info for {ticker}: {str(e)}")
-            return None
-    
+            # Check for specific error messages that indicate invalid ticker
+            error_str = str(e).lower()
+            if any(msg in error_str for msg in ["symbol not found", "not found or invalid", "no data found"]):
+                logger.warning(f"Ticker {ticker} not found on Yahoo Finance: {str(e)}")
+                return {"not_found": True, "source": self.source_name}
+            else:
+                logger.error(f"Error getting company info for {ticker}: {str(e)}")
+                return None
+            
     async def get_historical_prices(self, ticker: str, start_date: datetime, end_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """
         Get historical prices for a ticker

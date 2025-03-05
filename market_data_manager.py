@@ -271,7 +271,7 @@ class MarketDataManager:
         # If all sources fail, return None
         return None
     
-async def get_batch_prices(self, tickers: List[str]) -> Dict[str, Dict[str, Any]]:
+    async def get_batch_prices(self, tickers: List[str]) -> Dict[str, Dict[str, Any]]:
         """
         Get current prices for multiple tickers using the best available sources
         
@@ -331,7 +331,7 @@ async def get_batch_prices(self, tickers: List[str]) -> Dict[str, Dict[str, Any]
         
         return results
     
-async def get_company_metrics(self, ticker: str) -> Optional[Dict[str, Any]]:
+    async def get_company_metrics(self, ticker: str) -> Optional[Dict[str, Any]]:
         """
         Get company metrics for a ticker using the best available source
         
@@ -339,7 +339,7 @@ async def get_company_metrics(self, ticker: str) -> Optional[Dict[str, Any]]:
             ticker: Ticker symbol
             
         Returns:
-            Company metrics data or None if all sources fail
+            Dictionary with company metrics or None if all sources fail
         """
         sources_to_try = self._select_source_for_operation("company_metrics", ticker)
         
@@ -350,6 +350,14 @@ async def get_company_metrics(self, ticker: str) -> Optional[Dict[str, Any]]:
                 
             try:
                 metrics_data = await source.get_company_metrics(ticker)
+                
+                # Check if this source explicitly reported ticker not found
+                if metrics_data and metrics_data.get("not_found"):
+                    logger.info(f"Ticker {ticker} not found on {source_name}")
+                    
+                    # We don't record this as a failure for reliability metrics
+                    # since it's not a technical failure, just unavailability
+                    continue
                 
                 # Log API usage and reliability
                 success = metrics_data is not None
@@ -367,7 +375,7 @@ async def get_company_metrics(self, ticker: str) -> Optional[Dict[str, Any]]:
         # If all sources fail, return None
         return None
     
-async def get_historical_prices(self, ticker: str, start_date: datetime, end_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    async def get_historical_prices(self, ticker: str, start_date: datetime, end_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """
         Get historical prices for a ticker using the best available source
         
@@ -405,47 +413,11 @@ async def get_historical_prices(self, ticker: str, start_date: datetime, end_dat
         # If all sources fail, return empty list
         return []
     
-        def get_usage_stats(self) -> Dict[str, Any]:
-            """Get current usage statistics for all sources"""
+    def get_usage_stats(self) -> Dict[str, Any]:
+        """Get current usage statistics for all sources"""
         self._reset_usage_if_needed()
         return self.usage_stats
     
-        def get_available_sources(self) -> List[str]:
-            """Get list of all available data sources"""
+    def get_available_sources(self) -> List[str]:
+        """Get list of all available data sources"""
         return list(self.sources.keys())
-
-async def get_company_metrics(self, ticker: str) -> Optional[Dict[str, Any]]:
-    """
-    Get company metrics for a ticker using the best available source
-    
-    Args:
-        ticker: Ticker symbol
-        
-    Returns:
-        Dictionary with company metrics or None if all sources fail
-    """
-    sources_to_try = self._select_source_for_operation("company_metrics", ticker)
-    
-    for source_name in sources_to_try:
-        source = self.sources.get(source_name)
-        if not source:
-            continue
-            
-        try:
-            metrics_data = await source.get_company_metrics(ticker)
-            
-            # Log API usage and reliability
-            success = metrics_data is not None
-            self._log_api_usage(source_name, success)
-            self._record_ticker_source_result(ticker, source_name, success)
-            
-            if metrics_data:
-                return metrics_data
-                
-        except Exception as e:
-            logger.warning(f"Error getting metrics for {ticker} from {source_name}: {str(e)}")
-            self._log_api_usage(source_name, False)
-            self._record_ticker_source_result(ticker, source_name, False)
-    
-    # If all sources fail, return None
-    return None        

@@ -113,17 +113,33 @@ class PriceUpdaterV2:
                     SELECT ticker 
                     FROM securities 
                     WHERE ticker IN ({placeholders})
+                    AND (
+                        (on_yfinance IS NULL OR on_yfinance = true) 
+                        OR 
+                        (on_polygon IS NULL OR on_polygon = true)
+                    )
                 """
                 result = await self.database.fetch_all(query)
                 all_tickers = [row['ticker'] for row in result]
                 
-                # Check if any requested tickers don't exist
+                # Check if any requested tickers don't exist or are known to be unavailable
                 missing_tickers = set(tickers) - set(all_tickers)
                 if missing_tickers:
-                    logger.warning(f"Tickers not found in database: {missing_tickers}")
+                    logger.warning(f"Tickers not found in database or unavailable on all sources: {missing_tickers}")
             else:
-                # Otherwise get all active tickers
-                all_tickers = await self.get_active_tickers()
+                # Otherwise get all active tickers that aren't known to be unavailable on all sources
+                query = """
+                SELECT ticker 
+                FROM securities 
+                WHERE active = true 
+                AND (
+                    (on_yfinance IS NULL OR on_yfinance = true) 
+                    OR 
+                    (on_polygon IS NULL OR on_polygon = true)
+                )
+                """
+                result = await self.database.fetch_all(query)
+                all_tickers = [row['ticker'] for row in result]
             
             # Apply max_tickers limit if specified
             if max_tickers and len(all_tickers) > max_tickers:
@@ -157,13 +173,17 @@ class PriceUpdaterV2:
                         SET 
                             current_price = :price, 
                             last_updated = :timestamp,
-                            data_source = :source
+                            price_timestamp = :price_timestamp_str,
+                            data_source = :source,
+                            on_yfinance = CASE WHEN :source = 'yahoo_finance' THEN TRUE ELSE on_yfinance END,
+                            on_polygon = CASE WHEN :source = 'polygon' THEN TRUE ELSE on_polygon END
                         WHERE ticker = :ticker
                         """,
                         {
                             "ticker": ticker,
                             "price": data["price"],
                             "timestamp": datetime.utcnow(),
+                            "price_timestamp_str": data.get("price_timestamp_str"),
                             "source": data.get("source", "unknown")
                         }
                     )
@@ -189,6 +209,7 @@ class PriceUpdaterV2:
                     # Store update information for response
                     price_updates[ticker] = {
                         "price": data["price"],
+                        "price_timestamp": data.get("price_timestamp_str"),
                         "source": data.get("source", "unknown"),
                         "timestamp": datetime.utcnow().isoformat()
                     }
@@ -202,10 +223,44 @@ class PriceUpdaterV2:
             # Check for tickers that failed to get data
             missing_tickers = set(selected_tickers) - processed_tickers
             
-            # Mark tickers as unavailable if they failed to get data
+            # Process each missing ticker to identify the source of failure
             for ticker in missing_tickers:
-                await self.mark_ticker_unavailable(ticker)
-                unavailable_count += 1
+                try:
+                    # Try to identify why it failed - test each source individually
+                    yahoo_result = None
+                    polygon_result = None
+                    
+                    # Check if Yahoo Finance source is available
+                    yahoo_source = self.market_data.sources.get("yahoo_finance")
+                    if yahoo_source:
+                        yahoo_result = await yahoo_source.get_current_price(ticker)
+                        if yahoo_result and yahoo_result.get("not_found"):
+                            # Mark as not available on Yahoo Finance
+                            await self.database.execute(
+                                "UPDATE securities SET on_yfinance = FALSE WHERE ticker = :ticker",
+                                {"ticker": ticker}
+                            )
+                            logger.info(f"Marked {ticker} as not available on Yahoo Finance")
+                    
+                    # Check if Polygon source is available
+                    polygon_source = self.market_data.sources.get("polygon")
+                    if polygon_source:
+                        polygon_result = await polygon_source.get_current_price(ticker)
+                        if polygon_result and polygon_result.get("not_found"):
+                            # Mark as not available on Polygon
+                            await self.database.execute(
+                                "UPDATE securities SET on_polygon = FALSE WHERE ticker = :ticker",
+                                {"ticker": ticker}
+                            )
+                            logger.info(f"Marked {ticker} as not available on Polygon")
+                    
+                    # If neither source works, mark ticker as unavailable
+                    if (yahoo_result is None or yahoo_result.get("not_found")) and \
+                       (polygon_result is None or polygon_result.get("not_found")):
+                        unavailable_count += 1
+                except Exception as e:
+                    logger.error(f"Error processing missing ticker {ticker}: {str(e)}")
+                    unavailable_count += 1
             
             # Calculate duration
             duration = (datetime.now() - start_time).total_seconds()
@@ -248,7 +303,7 @@ class PriceUpdaterV2:
             logger.error(f"Error updating security prices: {str(e)}")
             
             # Record failure
-            if event_id:
+            if 'event_id' in locals() and event_id:
                 await update_system_event(
                     self.database,
                     event_id,
@@ -260,7 +315,7 @@ class PriceUpdaterV2:
             raise
         finally:
             await self.disconnect()
-    
+              
     async def update_company_metrics(self, tickers=None, max_tickers=None) -> Dict[str, Any]:
         """
         Update company metrics for securities
@@ -294,17 +349,33 @@ class PriceUpdaterV2:
                     SELECT ticker 
                     FROM securities 
                     WHERE ticker IN ({placeholders})
+                    AND (
+                        (on_yfinance IS NULL OR on_yfinance = true) 
+                        OR 
+                        (on_polygon IS NULL OR on_polygon = true)
+                    )
                 """
                 result = await self.database.fetch_all(query)
                 all_tickers = [row['ticker'] for row in result]
                 
-                # Check if any requested tickers don't exist
+                # Check if any requested tickers don't exist or are known to be unavailable
                 missing_tickers = set(tickers) - set(all_tickers)
                 if missing_tickers:
-                    logger.warning(f"Tickers not found in database: {missing_tickers}")
+                    logger.warning(f"Tickers not found in database or unavailable on all sources: {missing_tickers}")
             else:
-                # Otherwise get all active tickers
-                all_tickers = await self.get_active_tickers()
+                # Otherwise get all active tickers that aren't known to be unavailable on all sources
+                query = """
+                SELECT ticker 
+                FROM securities 
+                WHERE active = true 
+                AND (
+                    (on_yfinance IS NULL OR on_yfinance = true) 
+                    OR 
+                    (on_polygon IS NULL OR on_polygon = true)
+                )
+                """
+                result = await self.database.fetch_all(query)
+                all_tickers = [row['ticker'] for row in result]
             
             # Apply max_tickers limit if specified
             if max_tickers and len(all_tickers) > max_tickers:
@@ -351,7 +422,9 @@ class PriceUpdaterV2:
                             eps = :eps,
                             avg_volume = :avg_volume,
                             last_metrics_update = :timestamp,
-                            metrics_source = :source
+                            metrics_source = :source,
+                            on_yfinance = CASE WHEN :source = 'yahoo_finance' THEN TRUE ELSE on_yfinance END,
+                            on_polygon = CASE WHEN :source = 'polygon' THEN TRUE ELSE on_polygon END
                         WHERE ticker = :ticker
                         """,
                         {
@@ -385,6 +458,19 @@ class PriceUpdaterV2:
                 except Exception as e:
                     logger.error(f"Error updating metrics for {ticker}: {str(e)}")
                     unavailable_count += 1
+                    
+                    # If this was a "not found" error, update the appropriate flag
+                    if "not found" in str(e).lower() or "symbol not found" in str(e).lower():
+                        if "yahoo" in str(e).lower():
+                            await self.database.execute(
+                                "UPDATE securities SET on_yfinance = FALSE WHERE ticker = :ticker",
+                                {"ticker": ticker}
+                            )
+                        elif "polygon" in str(e).lower():
+                            await self.database.execute(
+                                "UPDATE securities SET on_polygon = FALSE WHERE ticker = :ticker",
+                                {"ticker": ticker}
+                            )
             
             # Calculate duration
             duration = (datetime.now() - start_time).total_seconds()
@@ -423,7 +509,7 @@ class PriceUpdaterV2:
             logger.error(f"Error updating company metrics: {str(e)}")
             
             # Record failure
-            if event_id:
+            if 'event_id' in locals() and event_id:
                 await update_system_event(
                     self.database,
                     event_id,
@@ -435,7 +521,8 @@ class PriceUpdaterV2:
             raise
         finally:
             await self.disconnect()
-    
+            
+            
     async def update_historical_prices(self, tickers=None, max_tickers=None, days=30) -> Dict[str, Any]:
         """
         Update historical prices for securities
@@ -786,37 +873,30 @@ class PriceUpdaterV2:
             await self.disconnect()
 
 # Standalone execution function
-async def run_price_update(update_type: str = "prices", max_tickers: int = None):
-    """
-    Run the price updater as a standalone script
-    
-    Args:
-        update_type: Type of update to perform (prices, metrics, history, smart)
-        max_tickers: Maximum number of tickers to process
-    """
-    updater = PriceUpdaterV2()
-    try:
-        result = None
-        
-        if update_type == "prices":
-            result = await updater.update_security_prices(max_tickers=max_tickers)
-            print(f"Price update complete: {result}")
-        elif update_type == "metrics":
-            result = await updater.update_company_metrics(max_tickers=max_tickers)
-            print(f"Metrics update complete: {result}")
-        elif update_type == "history":
-            # Default to 30 days of history
-            result = await updater.update_historical_prices(max_tickers=max_tickers, days=30)
-            print(f"Historical price update complete: {result}")
-        elif update_type == "smart":
-            # Smart update that prioritizes what needs updating most
-            result = await updater.smart_update(update_type="all", max_tickers=max_tickers)
-            print(f"Smart update complete: {result}")
-        else:
-            print(f"Unknown update type: {update_type}")
+    async def run_price_update(update_type: str = "prices", max_tickers: int = None, tickers_list: List[str] = None):
+        updater = PriceUpdaterV2()
+        try:
+            result = None
             
-    except Exception as e:
-        print(f"Update failed: {str(e)}")
+            if update_type == "prices":
+                result = await updater.update_security_prices(tickers=tickers_list, max_tickers=max_tickers)
+                print(f"Price update complete: {result}")
+            elif update_type == "metrics":
+                result = await updater.update_company_metrics(tickers=tickers_list, max_tickers=max_tickers)
+                print(f"Metrics update complete: {result}")
+            elif update_type == "history":
+                # Default to 30 days of history
+                result = await updater.update_historical_prices(tickers=tickers_list, max_tickers=max_tickers, days=30)
+                print(f"Historical price update complete: {result}")
+            elif update_type == "smart":
+                # Smart update that prioritizes what needs updating most
+                result = await updater.smart_update(update_type="all", max_tickers=max_tickers)
+                print(f"Smart update complete: {result}")
+            else:
+                print(f"Unknown update type: {update_type}")
+                
+        except Exception as e:
+            print(f"Update failed: {str(e)}")
 
 if __name__ == "__main__":
     import argparse
@@ -833,4 +913,4 @@ if __name__ == "__main__":
     if args.tickers:
         tickers_list = [ticker.strip().upper() for ticker in args.tickers.split(',')]
     
-    asyncio.run(run_price_update(args.type, args.max))
+    asyncio.run(run_price_update(args.type, args.max, tickers_list))  # Pass tickers_list here

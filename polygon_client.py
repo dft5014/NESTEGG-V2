@@ -6,6 +6,7 @@ import logging
 import asyncio
 import aiohttp
 from typing import List, Dict, Any, Optional
+import pytz
 from datetime import datetime, timedelta
 
 from .data_source_interface import MarketDataSource
@@ -58,6 +59,16 @@ class PolygonClient(MarketDataSource):
             
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params) as response:
+                    if response.status == 403:
+                        logger.error(f"Authentication error with Polygon API for {ticker}: Check API key or subscription plan")
+                        # Mark this as a global issue, not ticker-specific
+                        self.api_auth_error = True
+                        return None
+                    
+                    if response.status == 404:
+                        logger.warning(f"Ticker {ticker} not found on Polygon")
+                        return {"not_found": True, "source": self.source_name}
+                        
                     if response.status != 200:
                         logger.warning(f"Failed to get price for {ticker}: Status {response.status}")
                         return None
@@ -71,13 +82,23 @@ class PolygonClient(MarketDataSource):
                         
                     trade = data["results"]
                     
+                    # Convert Unix timestamp (ms) to datetime in Eastern Time
+                    trade_time = datetime.fromtimestamp(trade["t"] / 1000)
+                    eastern = pytz.timezone('US/Eastern')
+                    price_time_et = eastern.localize(trade_time)
+                    
+                    # Format time string for display
+                    price_time_str = price_time_et.strftime("%Y-%m-%d %I:%M:%S %p %Z")
+                    
                     return {
                         "price": float(trade["p"]),  # price
-                        "timestamp": datetime.fromtimestamp(trade["t"] / 1000),  # timestamp (ms to datetime)
+                        "timestamp": datetime.utcnow(),  # when we retrieved it
+                        "price_timestamp": price_time_et,  # when the price was recorded
+                        "price_timestamp_str": price_time_str,  # formatted string for display
                         "volume": int(trade["s"]) if "s" in trade else None,  # size (volume)
                         "source": self.source_name
                     }
-        
+            
         except Exception as e:
             logger.error(f"Error getting price for {ticker} from Polygon: {str(e)}")
             return None
@@ -118,12 +139,15 @@ class PolygonClient(MarketDataSource):
         """
         try:
             # For Polygon, we need to make a few separate API calls to get all the metrics
-            # First, get ticker details
             url = f"{self.base_url}/v3/reference/tickers/{ticker}"
             params = {"apiKey": self.api_key}
             
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params) as response:
+                    if response.status == 404:
+                        logger.warning(f"Ticker {ticker} not found on Polygon")
+                        return {"not_found": True, "source": self.source_name}
+                        
                     if response.status != 200:
                         logger.warning(f"Failed to get ticker details for {ticker}: Status {response.status}")
                         return None
@@ -156,6 +180,7 @@ class PolygonClient(MarketDataSource):
             metrics = {
                 "company_name": ticker_details.get("name"),
                 "sector": ticker_details.get("sic_description"),
+                "industry": ticker_details.get("standard_industrial_classification", {}).get("industry_title"),
                 "market_cap": ticker_details.get("market_cap"),
                 "source": self.source_name
             }
@@ -165,7 +190,8 @@ class PolygonClient(MarketDataSource):
                 metrics.update({
                     "pe_ratio": financials.get("ratios", {}).get("priceToEarningsRatio"),
                     "dividend_yield": financials.get("ratios", {}).get("dividendYield"),
-                    "eps": financials.get("ratios", {}).get("earningsPerBasicShare")
+                    "eps": financials.get("ratios", {}).get("earningsPerBasicShare"),
+                    "dividend_rate": financials.get("metrics", {}).get("annual_dividend_per_share")
                 })
                 
             return metrics
