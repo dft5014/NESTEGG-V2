@@ -11,9 +11,10 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Set
 from dotenv import load_dotenv
 
-# Import our new modules
+# Import our modules
 from api_clients.market_data_manager import MarketDataManager
 from utils.common import record_system_event, update_system_event
+from redis_cache import FastCache
 
 # Load environment variables
 load_dotenv()
@@ -140,6 +141,7 @@ class PriceUpdaterV2:
             unavailable_count = 0
             sources_used = set()
             price_updates = {}
+            processed_tickers = set()
             
             # Update securities table with new prices
             for ticker, data in price_data.items():
@@ -191,13 +193,13 @@ class PriceUpdaterV2:
                         "timestamp": datetime.utcnow().isoformat()
                     }
                     
+                    processed_tickers.add(ticker)
                     update_count += 1
                     
                 except Exception as e:
                     logger.error(f"Error updating security {ticker}: {str(e)}")
             
             # Check for tickers that failed to get data
-            processed_tickers = set(price_data.keys())
             missing_tickers = set(selected_tickers) - processed_tickers
             
             # Mark tickers as unavailable if they failed to get data
@@ -224,6 +226,21 @@ class PriceUpdaterV2:
                 "completed",
                 result
             )
+            
+            # After successful update, invalidate relevant caches
+            if FastCache.is_available():
+                # Invalidate cached portfolio calculations
+                FastCache.delete_pattern("portfolio:*")
+                
+                # Invalidate cached security data for processed tickers
+                for ticker in processed_tickers:
+                    FastCache.delete(f"security:{ticker}")
+                    FastCache.delete(f"security_history:{ticker}*")
+                    
+                # Invalidate securities list
+                FastCache.delete("securities:all")
+                
+                logger.info(f"Invalidated cache for {len(processed_tickers)} securities")
             
             return result
             
@@ -302,6 +319,7 @@ class PriceUpdaterV2:
             unavailable_count = 0
             sources_used = set()
             metrics_updates = {}
+            updated_tickers = set()
             
             # Process each ticker individually
             for ticker in selected_tickers:
@@ -361,6 +379,7 @@ class PriceUpdaterV2:
                         "timestamp": datetime.utcnow().isoformat()
                     }
                     
+                    updated_tickers.add(ticker)
                     update_count += 1
                     
                 except Exception as e:
@@ -386,6 +405,17 @@ class PriceUpdaterV2:
                 "completed",
                 result
             )
+            
+            # After successful update, invalidate relevant caches
+            if FastCache.is_available():
+                # Invalidate cached security data for updated tickers
+                for ticker in updated_tickers:
+                    FastCache.delete(f"security:{ticker}")
+                    
+                # Invalidate securities list
+                FastCache.delete("securities:all")
+                
+                logger.info(f"Invalidated cache for {len(updated_tickers)} securities")
             
             return result
             
@@ -470,6 +500,7 @@ class PriceUpdaterV2:
             price_points_added = 0
             sources_used = set()
             history_updates = {}
+            updated_tickers = set()
             
             # Process each ticker individually
             for ticker in selected_tickers:
@@ -549,6 +580,7 @@ class PriceUpdaterV2:
                         }
                     )
                     
+                    updated_tickers.add(ticker)
                     update_count += 1
                     
                 except Exception as e:
@@ -576,10 +608,168 @@ class PriceUpdaterV2:
                 result
             )
             
+            # After successful update, invalidate relevant caches
+            if FastCache.is_available():
+                # Invalidate security history caches
+                for ticker in updated_tickers:
+                    FastCache.delete(f"security_history:{ticker}*")
+                
+                logger.info(f"Invalidated historical data cache for {len(updated_tickers)} securities")
+            
             return result
             
         except Exception as e:
             logger.error(f"Error updating historical prices: {str(e)}")
+            
+            # Record failure
+            if event_id:
+                await update_system_event(
+                    self.database,
+                    event_id,
+                    "failed",
+                    {"error": str(e)},
+                    str(e)
+                )
+            
+            raise
+        finally:
+            await self.disconnect()
+
+    async def smart_update(self, update_type="all", max_tickers=None) -> Dict[str, Any]:
+        """
+        Perform a smart update of security data based on what needs updating most
+        
+        Args:
+            update_type: Type of update to perform (all, prices, metrics, history)
+            max_tickers: Maximum number of tickers to update per operation
+            
+        Returns:
+            Summary of updates made
+        """
+        try:
+            await self.connect()
+            
+            start_time = datetime.now()
+            
+            # Record the start of this operation
+            event_id = await record_system_event(
+                self.database, 
+                "smart_update", 
+                "started", 
+                {"update_type": update_type, "max_tickers": max_tickers}
+            )
+            
+            results = {}
+            
+            # Determine which tickers need price updates most urgently
+            if update_type in ["all", "prices"]:
+                # Find tickers with oldest price updates
+                price_query = """
+                SELECT ticker
+                FROM securities
+                WHERE active = true AND on_yfinance = true
+                ORDER BY COALESCE(last_updated, '1970-01-01') ASC
+                LIMIT :limit
+                """
+                
+                price_tickers = await self.database.fetch_all(
+                    price_query, 
+                    {"limit": max_tickers or 100}
+                )
+                
+                if price_tickers:
+                    price_tickers_list = [row["ticker"] for row in price_tickers]
+                    logger.info(f"Smart update: Updating prices for {len(price_tickers_list)} securities")
+                    results["prices"] = await self.update_security_prices(
+                        tickers=price_tickers_list
+                    )
+            
+            # Determine which tickers need metrics updates most urgently
+            if update_type in ["all", "metrics"]:
+                # Find tickers with oldest metrics updates
+                metrics_query = """
+                SELECT ticker
+                FROM securities
+                WHERE active = true AND on_yfinance = true
+                ORDER BY COALESCE(last_metrics_update, '1970-01-01') ASC
+                LIMIT :limit
+                """
+                
+                metrics_tickers = await self.database.fetch_all(
+                    metrics_query, 
+                    {"limit": max_tickers or 50}  # Fewer tickers for metrics as it's slower
+                )
+                
+                if metrics_tickers:
+                    metrics_tickers_list = [row["ticker"] for row in metrics_tickers]
+                    logger.info(f"Smart update: Updating metrics for {len(metrics_tickers_list)} securities")
+                    results["metrics"] = await self.update_company_metrics(
+                        tickers=metrics_tickers_list
+                    )
+            
+            # Determine which tickers need historical data updates most urgently
+            if update_type in ["all", "history"]:
+                # Find tickers with oldest historical updates
+                history_query = """
+                SELECT ticker
+                FROM securities
+                WHERE active = true AND on_yfinance = true
+                ORDER BY COALESCE(last_backfilled, '1970-01-01') ASC
+                LIMIT :limit
+                """
+                
+                history_tickers = await self.database.fetch_all(
+                    history_query, 
+                    {"limit": max_tickers or 20}  # Even fewer tickers for history as it's most intensive
+                )
+                
+                if history_tickers:
+                    history_tickers_list = [row["ticker"] for row in history_tickers]
+                    logger.info(f"Smart update: Updating historical data for {len(history_tickers_list)} securities")
+                    results["history"] = await self.update_historical_prices(
+                        tickers=history_tickers_list,
+                        days=30  # Default to 30 days of history
+                    )
+            
+            # Calculate duration
+            duration = (datetime.now() - start_time).total_seconds()
+            
+            # Create summary result
+            summary = {
+                "update_type": update_type,
+                "duration_seconds": duration,
+                "results": results
+            }
+            
+            # Compute overall statistics
+            total_updated = 0
+            total_unavailable = 0
+            all_sources_used = set()
+            
+            for key, result in results.items():
+                if "updated_count" in result:
+                    total_updated += result["updated_count"]
+                if "unavailable_count" in result:
+                    total_unavailable += result["unavailable_count"]
+                if "sources_used" in result:
+                    all_sources_used.update(result["sources_used"])
+            
+            summary["total_updated"] = total_updated
+            summary["total_unavailable"] = total_unavailable
+            summary["all_sources_used"] = list(all_sources_used)
+            
+            # Record completion
+            await update_system_event(
+                self.database,
+                event_id,
+                "completed",
+                summary
+            )
+            
+            return summary
+            
+        except Exception as e:
+            logger.error(f"Error in smart update: {str(e)}")
             
             # Record failure
             if event_id:
@@ -601,7 +791,7 @@ async def run_price_update(update_type: str = "prices", max_tickers: int = None)
     Run the price updater as a standalone script
     
     Args:
-        update_type: Type of update to perform (prices, metrics, history)
+        update_type: Type of update to perform (prices, metrics, history, smart)
         max_tickers: Maximum number of tickers to process
     """
     updater = PriceUpdaterV2()
@@ -618,6 +808,10 @@ async def run_price_update(update_type: str = "prices", max_tickers: int = None)
             # Default to 30 days of history
             result = await updater.update_historical_prices(max_tickers=max_tickers, days=30)
             print(f"Historical price update complete: {result}")
+        elif update_type == "smart":
+            # Smart update that prioritizes what needs updating most
+            result = await updater.smart_update(update_type="all", max_tickers=max_tickers)
+            print(f"Smart update complete: {result}")
         else:
             print(f"Unknown update type: {update_type}")
             
@@ -628,7 +822,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="NestEgg Market Data Updater")
-    parser.add_argument("--type", choices=["prices", "metrics", "history"], default="prices", help="Type of update to perform")
+    parser.add_argument("--type", choices=["prices", "metrics", "history", "smart"], default="smart", help="Type of update to perform")
     parser.add_argument("--max", type=int, help="Maximum number of tickers to process")
     parser.add_argument("--tickers", type=str, help="Comma-separated list of tickers to update")
     

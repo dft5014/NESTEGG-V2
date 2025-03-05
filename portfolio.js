@@ -3,8 +3,14 @@ import { AuthContext } from "@/context/AuthContext";
 import { useRouter } from "next/router";
 import { Line } from "react-chartjs-2";
 import "chart.js/auto";
+import SkeletonLoader from '@/components/SkeletonLoader';
+import { PortfolioSummarySkeleton, AccountsTableSkeleton, PositionsTableSkeleton } from '@/components/skeletons/PortfolioSkeleton';
+import ErrorMessage from '@/components/ErrorMessage';
+import SystemStatusDashboard from '@/components/SystemStatusDashboard';
 import SystemEvents from '@/components/SystemEvents';
 import { useEggMascot } from '@/context/EggMascotContext';
+
+
 
 // Portfolio component to display user portfolio data, accounts, and manage interactions
 export default function Portfolio() {
@@ -20,6 +26,7 @@ export default function Portfolio() {
   const [selectedTimeframe, setSelectedTimeframe] = useState("1Y");
   const [isAddAccountModalOpen, setIsAddAccountModalOpen] = useState(false);
   const [isEditAccountModalOpen, setIsEditAccountModalOpen] = useState(false);
+  const [error, setError] = useState(null);
   const [isAddPositionModalOpen, setIsAddPositionModalOpen] = useState(false);
   const [isUSSecuritiesModalOpen, setIsUSSecuritiesModalOpen] = useState(false);
   const [isEditPositionModalOpen, setIsEditPositionModalOpen] = useState(false);
@@ -43,6 +50,7 @@ export default function Portfolio() {
   const [selectedAccountDetail, setSelectedAccountDetail] = useState(null);
   const [isAccountDetailModalOpen, setIsAccountDetailModalOpen] = useState(false);
   const [securityShares, setSecurityShares] = useState(0);
+  const [showSystemStatus, setShowSystemStatus] = useState(false);
   const [portfolioSummary, setPortfolioSummary] = useState(null);
   const { triggerCartwheel } = useEggMascot();
   const [purchaseDate, setPurchaseDate] = useState("");
@@ -391,7 +399,7 @@ const updateMarketPrices = async () => {
   const token = localStorage.getItem("token");
   
   if (!token) {
-    alert("You must be logged in to update prices");
+    setError("You must be logged in to update prices");
     setLoading(false);
     return;
   }
@@ -404,16 +412,19 @@ const updateMarketPrices = async () => {
     
     if (response.ok) {
       const data = await response.json();
-      alert(data.message);
+      // Use setError for success messages too, with a short timeout
+      setError(`Success: ${data.message}`);
+      // Clear success message after 3 seconds
+      setTimeout(() => setError(null), 3000);
       // Refresh positions to show updated prices
       fetchAccounts();
     } else {
-      const error = await response.text();
-      alert(`Failed to update prices: ${error}`);
+      const errorText = await response.text();
+      setError(`Failed to update prices: ${errorText}`);
     }
   } catch (error) {
     console.error("Error updating prices:", error);
-    alert(`Error updating prices: ${error.message}`);
+    setError(`Error updating prices: ${error.message}`);
   } finally {
     setLoading(false);
   }
@@ -487,51 +498,53 @@ const triggerPortfolioCalculation = async () => {
   }
 };
 
-  // Fetch user accounts
-  const fetchAccounts = async () => {
-    const token = localStorage.getItem("token");
+const fetchAccounts = async () => {
+  const token = localStorage.getItem("token");
 
-    if (!token) {
-      console.error("⚠️ No token found in localStorage!");
-      return;
+  if (!token) {
+    setError("Authentication required. Please log in to continue.");
+    setLoading(false);
+    return;
+  }
+
+  try {
+    setLoading(true);
+    setError(null); // Reset error state
+    const response = await fetch(`${apiBaseUrl}/accounts`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Failed to fetch accounts: ${response.status} ${errorText}`);
     }
 
-    console.log("🔍 Fetching accounts with token:", token);
+    const data = await response.json();
 
-    try {
-      const response = await fetch(`${apiBaseUrl}/accounts`, {
-        headers: { Authorization: `Bearer ${token}` },
+    if (data.accounts && Array.isArray(data.accounts)) {
+      setAccounts(data.accounts);
+      
+      // Calculate total portfolio value
+      const totalValue = data.accounts.reduce(
+        (sum, account) => sum + account.balance,
+        0
+      );
+      setPortfolioValue(totalValue);
+      
+      // Fetch positions for each account
+      data.accounts.forEach(account => {
+        fetchPositions(account.id);
       });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`❌ Fetch failed: ${errorText}`);
-      }
-
-      const data = await response.json();
-      console.log("✅ Accounts fetched:", data);
-
-      if (data.accounts && Array.isArray(data.accounts)) {
-        setAccounts(data.accounts);
-        
-        // Calculate total portfolio value
-        const totalValue = data.accounts.reduce(
-          (sum, account) => sum + account.balance,
-          0
-        );
-        setPortfolioValue(totalValue);
-        
-        // Fetch positions for each account
-        data.accounts.forEach(account => {
-          fetchPositions(account.id);
-        });
-      } else {
-        console.error("⚠️ Unexpected data format:", data);
-      }
-    } catch (error) {
-      console.error("🔥 Error fetching accounts:", error);
+    } else {
+      setError("Unexpected data format received from server.");
     }
-  };
+  } catch (error) {
+    console.error("Error fetching accounts:", error);
+    setError(error.message || "Failed to load accounts. Please try again.");
+  } finally {
+    setLoading(false);
+  }
+};
   
 // get logo for account table
 const getInstitutionLogo = (institutionName) => {
@@ -545,31 +558,41 @@ const getInstitutionLogo = (institutionName) => {
 };
 
   // Fetch positions for an account
-  const fetchPositions = async (accountId) => {
-    const token = localStorage.getItem("token");
+const fetchPositions = async (accountId) => {
+  const token = localStorage.getItem("token");
+  
+  if (!token) return;
+  
+  try {
+    const response = await fetch(`${apiBaseUrl}/positions/${accountId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
     
-    if (!token) return;
+    if (!response.ok) {
+      console.error(`Failed to fetch positions for account ${accountId}`);
+      return;
+    }
     
-    try {
-      const response = await fetch(`${apiBaseUrl}/positions/${accountId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      
-      if (!response.ok) {
-        console.error(`Failed to fetch positions for account ${accountId}`);
-        return;
-      }
-      
-      const data = await response.json();
-      
+    const data = await response.json();
+    
+    if (data && data.positions) {
       setPositions(prevPositions => ({
         ...prevPositions,
         [accountId]: data.positions || []
       }));
-    } catch (error) {
-      console.error(`Error fetching positions for account ${accountId}:`, error);
+    } else {
+      console.warn(`No positions data returned for account ${accountId}`);
+      setPositions(prevPositions => ({
+        ...prevPositions,
+        [accountId]: []
+      }));
     }
-  };
+  } catch (error) {
+    console.error(`Error fetching positions for account ${accountId}:`, error);
+    // Add this if you want to show errors for individual position fetches
+    // setError(`Failed to load positions for one or more accounts. ${error.message}`);
+  }
+};
 
   // Search for securities
   const searchSecurities = async (query) => {
@@ -748,6 +771,15 @@ const handleAddPosition = (type) => {
   } else {
     if (type === "US Securities") {
       setIsUSSecuritiesModalOpen(true);
+    } else if (type === "Crypto") {
+      // Add crypto handling logic later
+      alert("Crypto support coming soon!");
+    } else if (type === "Metals") {
+      // Add metals handling logic later
+      alert("Precious metals support coming soon!");
+    } else if (type === "Manual Asset") {
+      // Add manual asset handling logic later
+      alert("Manual asset support coming soon!");
     }
     // Add logic for other types in the future
   }
@@ -770,15 +802,19 @@ const handleAddPosition = (type) => {
   };
 
   // Handle submitting a new security position
-  const handleAddSecurity = async () => {
+const handleAddSecurity = async () => {
     if (!securitySearch || securityShares <= 0 || !selectedAccount || !purchaseDate || !costPerShare) {
       setFormMessage("All fields are required");
       return;
     }
     
+    setFormMessage(""); // Clear previous messages
     const token = localStorage.getItem("token");
     
     try {
+      // Add loading state
+      setFormMessage("Adding position...");
+      
       const response = await fetch(`${apiBaseUrl}/positions/${selectedAccount}`, {
         method: "POST",
         headers: {
@@ -816,7 +852,7 @@ const handleAddPosition = (type) => {
       }
     } catch (error) {
       console.error("Error adding position:", error);
-      setFormMessage("Error adding position");
+      setFormMessage(`Error adding position: ${error.message}`);
     }
   };
 
@@ -1170,24 +1206,59 @@ const handleBulkUpload = async () => {
       <header className="portfolio-header">
         <h1 className="portfolio-title">Your Portfolio</h1>
         <p className="portfolio-subtitle">Track your NestEgg growth</p>
+        
+        {/* Add this button */}
+        <button 
+          onClick={() => setShowSystemStatus(!showSystemStatus)}
+          className="mt-2 text-sm text-blue-600 hover:text-blue-800 underline"
+        >
+          {showSystemStatus ? 'Hide System Status' : 'Show System Status'}
+        </button>
       </header>
 
-      <div className="portfolio-dashboard">
-        <div className="dashboard-card net-worth">
-          <h2 className="dashboard-label">Net Worth</h2>
-          <p className="dashboard-value">${portfolioValue.toLocaleString()}</p>
-        </div>
-        <div className="dashboard-card performance-today">
-          <h2 className="dashboard-label">Today's Performance</h2>
-          <p className="dashboard-value">+ $2,500</p>
-        </div>
-        <div className="dashboard-card performance-year">
-          <h2 className="dashboard-label">12-Month Performance</h2>
-          <p className="dashboard-value">+ 20%</p>
-        </div>
-      </div>
+{/* Add the system status dashboard below the header */}
+{showSystemStatus && (
+  <>
+    <SystemStatusDashboard />
+    <SystemEvents />
+  </>
+)}
 
-      <SystemEvents />
+{/* Error Message with Retry */}
+{error && (
+  <ErrorMessage 
+    error={error}
+    onRetry={() => {
+      setError(null);
+      setLoading(true);
+      fetchAccounts();
+      fetchPortfolioSummary();
+    }}
+    className="mb-6"
+  />
+)}
+
+      {/* Portfolio Dashboard */}
+      {loading ? (
+        <PortfolioSummarySkeleton />
+      ) : (
+        <div className="portfolio-dashboard">
+          <div className="dashboard-card net-worth">
+            <h2 className="dashboard-label">Net Worth</h2>
+            <p className="dashboard-value">${portfolioValue.toLocaleString()}</p>
+          </div>
+          <div className="dashboard-card performance-today">
+            <h2 className="dashboard-label">Today's Performance</h2>
+            <p className="dashboard-value">+ $2,500</p>
+          </div>
+          <div className="dashboard-card performance-year">
+            <h2 className="dashboard-label">12-Month Performance</h2>
+            <p className="dashboard-value">+ 20%</p>
+          </div>
+        </div>
+      )}
+
+
 
 
 
@@ -1370,24 +1441,30 @@ const handleBulkUpload = async () => {
         ))}
       </div>
 
-      <div className="portfolio-chart">
-        <Line data={chartData} options={chartOptions} />
-      </div>
-
+      {loading ? (
+        <SkeletonLoader type="chart" height="h-60" className="mb-10" />
+      ) : (
+        <div className="portfolio-chart">
+          <Line data={chartData} options={chartOptions} />
+        </div>
+      )}
       <section className="portfolio-accounts">
-  <div className="accounts-header">
-    <h2 className="accounts-title">Your Accounts</h2>
-    <div className="flex space-x-2">
-      <button className="add-account-btn" onClick={() => setIsBulkUploadModalOpen(true)}>
-        📋 Bulk Upload
-      </button>
-      <button className="add-account-btn" onClick={() => setIsAddAccountModalOpen(true)}>
-        ➕ Add Account
-      </button>
-    </div>
-  </div>
-  {accounts.length > 0 ? (
-  <table className="accounts-table">
+        <div className="accounts-header">
+          <h2 className="accounts-title">Your Accounts</h2>
+          <div className="flex space-x-2">
+            <button className="add-account-btn" onClick={() => setIsBulkUploadModalOpen(true)}>
+              📋 Bulk Upload
+            </button>
+            <button className="add-account-btn" onClick={() => setIsAddAccountModalOpen(true)}>
+              ➕ Add Account
+            </button>
+          </div>
+        </div>
+        
+        {loading ? (
+          <AccountsTableSkeleton />
+        ) : accounts.length > 0 ? (
+          <table className="accounts-table">
     <thead>
       <tr>
         <th className="table-header">Account Name</th>
@@ -1474,103 +1551,107 @@ const handleBulkUpload = async () => {
         );
       })}
     </tbody>
-  </table>
-) : (
-  <p className="accounts-empty">
-    🥚 Add accounts by clicking "Add Account" to start tracking your{" "}
-    <span className="text-blue-600">NestEGG</span>!
-  </p>
-)}
-      </section>
+    </table>
+  ) : (
+    <p className="accounts-empty">
+      🥚 Add accounts by clicking "Add Account" to start tracking your{" "}
+      <span className="text-blue-600">NestEGG</span>!
+    </p>
+  )}
+</section>
 
-      {/* Account Positions Section */}
-      {Object.keys(positions).length > 0 && (
-        <section className="portfolio-positions mt-10">
-          <h2 className="accounts-title mb-6">Holdings</h2>
-          
-          {Object.entries(positions).map(([accountId, accountPositions]) => {
-  const account = accounts.find(a => a.id === parseInt(accountId));
-  if (!account || !accountPositions.length) return null;
-  
-  return (
-    <div key={accountId} className="mb-8 bg-white p-4 rounded-lg shadow-sm">
-      <div className="flex justify-between items-center mb-3">
-        <h3 className="text-lg font-semibold">{account.account_name}</h3>
-        <button 
-          className="px-3 py-1 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600 transition-colors"
-          onClick={() => handleAddPositionClick(account.id)}
-        >
-          ➕ Add Position
-        </button>
-      </div>
-      
-      <table className="accounts-table">
-        <thead>
-          <tr>
-            <th className="table-header">Ticker</th>
-            <th className="table-header">Shares</th>
-            <th className="table-header">Price</th>
-            <th className="table-header">Value</th>
-            <th className="table-header">Cost Basis</th> {/* New column */}
-            <th className="table-header">Gain/Loss</th> {/* New column */}
-            <th className="table-header">Purchase Date</th> {/* Changed column */}
-            <th className="table-header">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {accountPositions.map((position) => {
-            const positionCostBasis = (position.cost_basis || position.price) * position.shares;
-            const gainLoss = position.value - positionCostBasis;
-            const gainLossPercent = positionCostBasis > 0 ? (gainLoss / positionCostBasis) * 100 : 0;
-            
-            return (
-              <tr 
-                key={position.id} 
-                className="table-row hover:bg-gray-50 cursor-pointer"
-                onClick={() => handlePositionDetailClick(position)}
+{/* Account Positions Section */}
+{Object.keys(positions).length > 0 && (
+  <section className="portfolio-positions mt-10">
+    <h2 className="accounts-title mb-6">Holdings</h2>
+    
+    {loading ? (
+      <PositionsTableSkeleton />
+    ) : (
+      Object.entries(positions).map(([accountId, accountPositions]) => {
+        const account = accounts.find(a => a.id === parseInt(accountId));
+        if (!account || !accountPositions.length) return null;
+        
+        return (
+          <div key={accountId} className="mb-8 bg-white p-4 rounded-lg shadow-sm">
+            <div className="flex justify-between items-center mb-3">
+              <h3 className="text-lg font-semibold">{account.account_name}</h3>
+              <button 
+                className="px-3 py-1 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600 transition-colors"
+                onClick={() => handleAddPositionClick(account.id)}
               >
-                <td className="table-cell font-medium">{position.ticker}</td>
-                <td className="table-cell">{position.shares.toLocaleString()}</td>
-                <td className="table-cell">${position.price.toLocaleString()}</td>
-                <td className="table-cell">${position.value.toLocaleString()}</td>
-                <td className="table-cell">${positionCostBasis.toLocaleString()}</td>
-                <td className="table-cell">
-                  <div className="flex flex-col">
-                    <span className={gainLoss >= 0 ? "text-green-600" : "text-red-600"}>
-                      {gainLoss >= 0 ? "+" : ""}{gainLoss.toLocaleString('en-US', {style: 'currency', currency: 'USD'})}
-                    </span>
-                    <span className={`text-xs ${gainLoss >= 0 ? "text-green-600" : "text-red-600"}`}>
-                      {gainLoss >= 0 ? "+" : ""}{gainLossPercent.toFixed(2)}%
-                    </span>
-                  </div>
-                </td>
-                <td className="table-cell">{position.purchase_date ? new Date(position.purchase_date).toLocaleDateString() : 'N/A'}</td>
-                <td className="table-cell actions-cell" onClick={(e) => e.stopPropagation()}>
-                  <button
-                    className="action-btn edit-btn"
-                    onClick={() => handleEditPositionClick(position)}
-                    title="Edit Position"
-                  >
-                    ⚙️
-                  </button>
-                  <button
-                    className="action-btn delete-btn"
-                    onClick={() => handleDeletePositionClick(position.id)}
-                    title="Delete Position"
-                  >
-                    🗑️
-                  </button>
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-})}
-        </section>
-      )}
+                ➕ Add Position
+              </button>
+            </div>
+            
+            <table className="accounts-table">
+              <thead>
+                <tr>
+                  <th className="table-header">Ticker</th>
+                  <th className="table-header">Shares</th>
+                  <th className="table-header">Price</th>
+                  <th className="table-header">Value</th>
+                  <th className="table-header">Cost Basis</th>
+                  <th className="table-header">Gain/Loss</th>
+                  <th className="table-header">Purchase Date</th>
+                  <th className="table-header">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {accountPositions.map((position) => {
+                  const positionCostBasis = (position.cost_basis || position.price) * position.shares;
+                  const gainLoss = position.value - positionCostBasis;
+                  const gainLossPercent = positionCostBasis > 0 ? (gainLoss / positionCostBasis) * 100 : 0;
+                  
+                  return (
+                    <tr 
+                      key={position.id} 
+                      className="table-row hover:bg-gray-50 cursor-pointer"
+                      onClick={() => handlePositionDetailClick(position)}
+                    >
+                      <td className="table-cell font-medium">{position.ticker}</td>
+                      <td className="table-cell">{position.shares.toLocaleString()}</td>
+                      <td className="table-cell">${position.price.toLocaleString()}</td>
+                      <td className="table-cell">${position.value.toLocaleString()}</td>
+                      <td className="table-cell">${positionCostBasis.toLocaleString()}</td>
+                      <td className="table-cell">
+                        <div className="flex flex-col">
+                          <span className={gainLoss >= 0 ? "text-green-600" : "text-red-600"}>
+                            {gainLoss >= 0 ? "+" : ""}{gainLoss.toLocaleString('en-US', {style: 'currency', currency: 'USD'})}
+                          </span>
+                          <span className={`text-xs ${gainLoss >= 0 ? "text-green-600" : "text-red-600"}`}>
+                            {gainLoss >= 0 ? "+" : ""}{gainLossPercent.toFixed(2)}%
+                          </span>
+                        </div>
+                      </td>
+                      <td className="table-cell">{position.purchase_date ? new Date(position.purchase_date).toLocaleDateString() : 'N/A'}</td>
+                      <td className="table-cell actions-cell" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          className="action-btn edit-btn"
+                          onClick={() => handleEditPositionClick(position)}
+                          title="Edit Position"
+                        >
+                          ⚙️
+                        </button>
+                        <button
+                          className="action-btn delete-btn"
+                          onClick={() => handleDeletePositionClick(position.id)}
+                          title="Delete Position"
+                        >
+                          🗑️
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        );
+      })
+    )}
+  </section>
+)}
 
       {/* Add Account Modal */}
 {/* Add Account Modal */}
@@ -1683,7 +1764,12 @@ const handleBulkUpload = async () => {
           step="0.01"
         />
         <div className="modal-buttons">
-          <button type="submit" className="modal-submit" disabled={!accountCategory}>Add</button>
+          <button 
+            type="submit" 
+            className="modal-submit" 
+            disabled={!accountCategory}>
+              Add
+            </button>
           <button
             type="button"
             className="modal-cancel"

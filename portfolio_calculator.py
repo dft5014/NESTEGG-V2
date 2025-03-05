@@ -1,5 +1,5 @@
 """
-Portfolio calculator module.
+Portfolio calculator module with caching.
 Handles calculation of portfolio values based on current security prices.
 This is decoupled from the price updating process.
 """
@@ -13,6 +13,7 @@ from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 
 from utils.common import record_system_event, update_system_event
+from redis_cache import cache_result, FastCache
 
 # Load environment variables
 load_dotenv()
@@ -177,6 +178,11 @@ class PortfolioCalculator:
                 result
             )
             
+            # Invalidate cached user portfolio calculations
+            if FastCache.is_available():
+                FastCache.delete_pattern("portfolio:user:*")
+                logger.info("Invalidated cached user portfolio calculations")
+            
             return result
             
         except Exception as e:
@@ -198,14 +204,24 @@ class PortfolioCalculator:
     
     async def calculate_user_portfolio(self, user_id: str) -> Dict[str, Any]:
         """
-        Calculate portfolio values for a specific user
+        Calculate portfolio values for a specific user with caching
         
         Args:
             user_id: User ID to calculate portfolio for
-            
+                
         Returns:
             Summary of updates made
         """
+        # Generate cache key
+        cache_key = f"portfolio:user:{user_id}"
+        
+        # Check cache first
+        if FastCache.is_available():
+            cached_result = FastCache.get(cache_key)
+            if cached_result:
+                logger.info(f"Using cached portfolio calculation for user {user_id}")
+                return cached_result
+        
         try:
             await self.connect()
             
@@ -249,6 +265,10 @@ class PortfolioCalculator:
                     "completed",
                     result
                 )
+                
+                # Cache the empty result for 15 minutes
+                if FastCache.is_available():
+                    FastCache.set(cache_key, result, expire_seconds=900)  # 15 minutes
                 
                 return result
             
@@ -354,6 +374,10 @@ class PortfolioCalculator:
                 result
             )
             
+            # Cache the result for 15 minutes
+            if FastCache.is_available():
+                FastCache.set(cache_key, result, expire_seconds=900)  # 15 minutes
+            
             return result
             
         except Exception as e:
@@ -373,6 +397,7 @@ class PortfolioCalculator:
         finally:
             await self.disconnect()
     
+    @cache_result(key_prefix="portfolio", expire_seconds=3600)  # Cache for 1 hour
     async def snapshot_portfolio_values(self) -> Dict[str, Any]:
         """
         Take a snapshot of all portfolio values for historical tracking
@@ -496,6 +521,136 @@ class PortfolioCalculator:
                     str(e)
                 )
             
+            raise
+        finally:
+            await self.disconnect()
+            
+    async def calculate_portfolio_performance(self, user_id: str, period: str = "1m") -> Dict[str, Any]:
+        """
+        Calculate portfolio performance over a specific time period
+        
+        Args:
+            user_id: User ID to calculate performance for
+            period: Time period (1w, 1m, 3m, 6m, 1y, ytd, max)
+            
+        Returns:
+            Performance metrics
+        """
+        # Generate cache key
+        cache_key = f"portfolio:performance:{user_id}:{period}"
+        
+        # Check cache first
+        if FastCache.is_available():
+            cached_result = FastCache.get(cache_key)
+            if cached_result:
+                logger.info(f"Using cached performance data for user {user_id}, period {period}")
+                return cached_result
+                
+        try:
+            await self.connect()
+            
+            # Calculate date range based on period
+            end_date = datetime.now().date()
+            
+            if period == "1w":
+                start_date = end_date - timedelta(days=7)
+            elif period == "1m":
+                start_date = end_date - timedelta(days=30)
+            elif period == "3m":
+                start_date = end_date - timedelta(days=90)
+            elif period == "6m":
+                start_date = end_date - timedelta(days=180)
+            elif period == "1y":
+                start_date = end_date - timedelta(days=365)
+            elif period == "ytd":
+                start_date = datetime(end_date.year, 1, 1).date()
+            else:  # max
+                # Get the earliest data point
+                earliest_query = """
+                SELECT MIN(date) as earliest_date
+                FROM portfolio_history
+                WHERE user_id = :user_id
+                """
+                earliest_result = await self.database.fetch_one(earliest_query, {"user_id": user_id})
+                start_date = earliest_result["earliest_date"] if earliest_result and earliest_result["earliest_date"] else end_date - timedelta(days=365)
+            
+            # Get historical portfolio values
+            history_query = """
+            SELECT 
+                date,
+                value,
+                cost_basis,
+                gain_loss,
+                gain_loss_pct
+            FROM portfolio_history
+            WHERE 
+                user_id = :user_id AND 
+                date BETWEEN :start_date AND :end_date
+            ORDER BY date ASC
+            """
+            
+            history = await self.database.fetch_all(
+                history_query, 
+                {
+                    "user_id": user_id,
+                    "start_date": start_date,
+                    "end_date": end_date
+                }
+            )
+            
+            # Get current portfolio value
+            current_value_query = """
+            SELECT 
+                SUM(balance) as current_value,
+                SUM(cost_basis) as current_cost
+            FROM accounts
+            WHERE user_id = :user_id
+            """
+            
+            current_value_result = await self.database.fetch_one(current_value_query, {"user_id": user_id})
+            
+            current_value = float(current_value_result["current_value"]) if current_value_result and current_value_result["current_value"] else 0
+            current_cost = float(current_value_result["current_cost"]) if current_value_result and current_value_result["current_cost"] else 0
+            
+            # Calculate performance metrics
+            history_points = []
+            for point in history:
+                history_points.append({
+                    "date": point["date"].isoformat(),
+                    "value": float(point["value"]),
+                    "cost_basis": float(point["cost_basis"]) if point["cost_basis"] else 0,
+                    "gain_loss": float(point["gain_loss"]) if point["gain_loss"] else 0,
+                    "gain_loss_pct": float(point["gain_loss_pct"]) if point["gain_loss_pct"] else 0
+                })
+            
+            # Calculate period performance
+            start_value = history_points[0]["value"] if history_points else 0
+            change_value = current_value - start_value
+            change_pct = (change_value / start_value * 100) if start_value > 0 else 0
+            
+            result = {
+                "user_id": user_id,
+                "period": period,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "start_value": start_value,
+                "current_value": current_value,
+                "change_value": change_value,
+                "change_percentage": change_pct,
+                "current_cost_basis": current_cost,
+                "current_gain_loss": current_value - current_cost,
+                "current_gain_loss_pct": ((current_value - current_cost) / current_cost * 100) if current_cost > 0 else 0,
+                "history": history_points
+            }
+            
+            # Cache the result for 30 minutes
+            if FastCache.is_available():
+                FastCache.set(cache_key, result, expire_seconds=1800)  # 30 minutes
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error calculating portfolio performance for user {user_id}: {str(e)}")
             raise
         finally:
             await self.disconnect()

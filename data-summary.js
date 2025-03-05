@@ -17,6 +17,10 @@ import {
 } from 'lucide-react';
 import { Line } from "react-chartjs-2";
 import "chart.js/auto";
+import SkeletonLoader from '@/components/SkeletonLoader';
+import { DataSummarySkeleton } from '@/components/skeletons/DataSummarySkeleton';
+import { SecurityDetailSkeleton } from '@/components/skeletons/PortfolioSkeleton';
+import ErrorMessage from '@/components/ErrorMessage';
 
 export default function DataSummary() {
   const router = useRouter();
@@ -45,7 +49,8 @@ export default function DataSummary() {
       const token = localStorage.getItem("token");
       
       if (!token) {
-        router.push("/login");
+        setError("Authentication required. Please log in to continue.");
+        setTimeout(() => router.push("/login"), 2000);
         return;
       }
       
@@ -63,11 +68,17 @@ export default function DataSummary() {
       }
       
       const data = await response.json();
-      setSecurities(data.securities || []);
+      if (data && data.securities) {
+        setSecurities(data.securities);
+      } else {
+        setError("Received unexpected data format from server");
+      }
     } catch (error) {
-      setError(error.message || "Failed to load securities data");
+      console.error("Error fetching securities:", error);
       if (error instanceof TypeError) {
-        setError("Network error. Please check your connection.");
+        setError("Network error. Please check your connection and try again.");
+      } else {
+        setError(error.message || "Failed to load securities data. Please try again.");
       }
     } finally {
       setLoading(false);
@@ -178,12 +189,14 @@ export default function DataSummary() {
   // Refresh prices function
   const refreshPrices = async () => {
     setRefreshing(true);
+    setError(null);
     
     try {
       const token = localStorage.getItem("token");
       
       if (!token) {
-        router.push("/login");
+        setError("Authentication required. Please log in to continue.");
+        setTimeout(() => router.push("/login"), 2000);
         return;
       }
       
@@ -193,15 +206,18 @@ export default function DataSummary() {
       });
       
       if (!response.ok) {
-        throw new Error("Failed to refresh prices");
+        const errorText = await response.text();
+        throw new Error(errorText || "Failed to refresh prices");
       }
       
       const data = await response.json();
-      alert(data.message);
+      // Use a temporary success message that will appear and then disappear
+      setError(`Success: ${data.message}`);
+      setTimeout(() => setError(null), 3000);
       await fetchSecurities();
     } catch (error) {
       console.error("Error refreshing prices:", error);
-      alert("Failed to refresh prices. Please try again later.");
+      setError(`Failed to refresh prices: ${error.message}`);
     } finally {
       setRefreshing(false);
     }
@@ -215,7 +231,8 @@ export default function DataSummary() {
       const token = localStorage.getItem("token");
       
       if (!token) {
-        router.push("/login");
+        setError("Authentication required. Please log in to continue.");
+        setTimeout(() => router.push("/login"), 2000);
         return;
       }
       
@@ -229,16 +246,24 @@ export default function DataSummary() {
       });
       
       if (!response.ok) {
-        throw new Error(`Failed to update ${ticker}: ${updateType}`);
+        const errorText = await response.text();
+        throw new Error(errorText || `Failed to update ${ticker}: ${updateType}`);
       }
       
       const data = await response.json();
-      alert(data.message || `${ticker} updated successfully`);
+      setError(`Success: ${data.message || `${ticker} updated successfully`}`);
+      setTimeout(() => setError(null), 3000);
       setShowUpdateModal(false);
       await fetchSecurities();
+      
+      // If updating the currently selected security, refresh its details
+      if (selectedSecurity && selectedSecurity.ticker === ticker) {
+        await fetchSecurityDetails(ticker);
+        await fetchHistoricalData(ticker);
+      }
     } catch (error) {
       console.error("Error updating security:", error);
-      alert(`Failed to update ${ticker}: ${error.message}`);
+      setError(`Failed to update ${ticker}: ${error.message}`);
     } finally {
       setRefreshing(false);
     }
@@ -247,13 +272,20 @@ export default function DataSummary() {
   // Add new security
   const addSecurity = async (e) => {
     e.preventDefault();
+    
+    if (!newSecurity.ticker.trim()) {
+      setError("Please enter a valid ticker symbol");
+      return;
+    }
+    
     setRefreshing(true);
     
     try {
       const token = localStorage.getItem("token");
       
       if (!token) {
-        router.push("/login");
+        setError("Authentication required. Please log in to continue.");
+        setTimeout(() => router.push("/login"), 2000);
         return;
       }
       
@@ -267,17 +299,21 @@ export default function DataSummary() {
       });
       
       if (!response.ok) {
-        throw new Error("Failed to add security");
+        const errorText = await response.text();
+        throw new Error(errorText || "Failed to add security");
       }
       
       const data = await response.json();
-      alert(data.message || "Security added successfully");
+      // Use a temporary success message
+      setError(`Success: ${data.message || "Security added successfully"}`);
+      setTimeout(() => setError(null), 3000);
+      
       setShowAddSecurityModal(false);
       setNewSecurity({ ticker: "" });
       await fetchSecurities();
     } catch (error) {
       console.error("Error adding security:", error);
-      alert(`Failed to add security: ${error.message}`);
+      setError(`Failed to add security: ${error.message}`);
     } finally {
       setRefreshing(false);
     }
@@ -347,10 +383,26 @@ export default function DataSummary() {
   // Loading state
   if (loading) {
     return (
-      <div className="min-h-screen p-6 flex justify-center items-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading securities data...</p>
+      <div className="min-h-screen p-6">
+        <div className="max-w-8xl mx-auto">
+          <header className="mb-8 bg-blue-900 text-white p-4 rounded-lg">
+            <div className="flex items-center">
+              <ChartLine className="w-6 h-6 text-blue-400 mr-2" />
+              <h1 className="text-3xl font-bold">NestEgg Data Summary</h1>
+            </div>
+            <p className="text-blue-200 mt-2">View and manage your securities data</p>
+          </header>
+          
+          <div className="bg-white rounded-xl shadow-md p-6 mb-8">
+            <div className="flex flex-col md:flex-row justify-between items-center mb-6">
+              <div className="flex items-center mb-4 md:mb-0">
+                <ChartLine className="w-6 h-6 text-blue-600 mr-2" />
+                <h2 className="text-xl font-semibold">Securities Data</h2>
+              </div>
+            </div>
+            
+            <DataSummarySkeleton />
+          </div>
         </div>
       </div>
     );
@@ -440,9 +492,15 @@ export default function DataSummary() {
           </div>
 
           {error && (
-            <div className="bg-red-100 text-red-700 p-4 rounded-lg mb-6">
-              {error}
-            </div>
+            <ErrorMessage 
+              error={error}
+              onRetry={() => {
+                setError(null);
+                fetchSecurities();
+              }}
+              onBack={() => router.push('/portfolio')}
+              className="mb-6"
+            />
           )}
 
           <div className="overflow-x-auto">
@@ -758,9 +816,7 @@ export default function DataSummary() {
               <h3 className="text-lg font-semibold mb-3">Security Details</h3>
               
               {detailsLoading ? (
-                <div className="flex justify-center items-center h-64">
-                  <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div>
-                </div>
+                <SecurityDetailSkeleton />
               ) : securityDetails ? (
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 gap-4">
@@ -986,7 +1042,9 @@ export default function DataSummary() {
                 <div className="bg-white p-4 rounded-lg shadow-md">
                   <h4 className="text-lg font-semibold mb-2">Historical Price Trends</h4>
                   <div className="h-64">
-                    {historicalData.length > 0 ? (
+                    {detailsLoading ? (
+                      <SkeletonLoader type="chart" height="h-64" />
+                    ) : historicalData.length > 0 ? (
                       <Line data={chartData} options={chartOptions} />
                     ) : (
                       <p className="text-center text-gray-500">No historical data available.</p>
