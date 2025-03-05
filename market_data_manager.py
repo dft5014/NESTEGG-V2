@@ -413,3 +413,39 @@ async def get_historical_prices(self, ticker: str, start_date: datetime, end_dat
         def get_available_sources(self) -> List[str]:
             """Get list of all available data sources"""
         return list(self.sources.keys())
+
+async def get_company_metrics(self, ticker: str) -> Optional[Dict[str, Any]]:
+    """
+    Get company metrics for a ticker using the best available source
+    
+    Args:
+        ticker: Ticker symbol
+        
+    Returns:
+        Dictionary with company metrics or None if all sources fail
+    """
+    sources_to_try = self._select_source_for_operation("company_metrics", ticker)
+    
+    for source_name in sources_to_try:
+        source = self.sources.get(source_name)
+        if not source:
+            continue
+            
+        try:
+            metrics_data = await source.get_company_metrics(ticker)
+            
+            # Log API usage and reliability
+            success = metrics_data is not None
+            self._log_api_usage(source_name, success)
+            self._record_ticker_source_result(ticker, source_name, success)
+            
+            if metrics_data:
+                return metrics_data
+                
+        except Exception as e:
+            logger.warning(f"Error getting metrics for {ticker} from {source_name}: {str(e)}")
+            self._log_api_usage(source_name, False)
+            self._record_ticker_source_result(ticker, source_name, False)
+    
+    # If all sources fail, return None
+    return None        
