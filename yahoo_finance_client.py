@@ -41,66 +41,32 @@ class YahooFinanceClient(MarketDataSource):
     
     async def get_current_price(self, ticker: str) -> Optional[Dict[str, Any]]:
         """
-        Get current price for a single ticker
-        
-        Args:
-            ticker: Ticker symbol
-            
-        Returns:
-            Dictionary with price data or None if unavailable
+        Get current price using the same approach
         """
         try:
-            # Use a separate thread for the yfinance API call
-            loop = asyncio.get_event_loop()
+            # Fetch ticker data
+            ticker_obj = yf.Ticker(ticker)
             
-            try:
-                # Attempt to get ticker data with timeout
-                ticker_data = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: yf.Ticker(ticker)),
-                    timeout=15  # 15 second timeout
-                )
-                
-                # Get price data with timeout
-                price_data = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: ticker_data.history(period="1d")),
-                    timeout=15  # 15 second timeout
-                )
-                
-                if price_data.empty:
-                    logger.warning(f"No price data available for {ticker}")
-                    return None
-                
-                # Get the latest price
-                latest_price = price_data['Close'].iloc[-1]
-                
-                # Get the timestamp in Eastern Time
-                price_time = price_data.index[-1]
-                eastern = pytz.timezone('US/Eastern')
-                price_time_et = price_time.astimezone(eastern)
-                
-                # Format time string for display
-                price_time_str = price_time_et.strftime("%Y-%m-%d %I:%M:%S %p %Z")
-                
-                return {
-                    "price": latest_price,
-                    "timestamp": datetime.now(),
-                    "price_timestamp": price_time_et,
-                    "price_timestamp_str": price_time_str,
-                    "volume": price_data['Volume'].iloc[-1] if 'Volume' in price_data else None,
-                    "source": self.source_name
-                }
+            # Get historical data
+            history = ticker_obj.history(period="1d")
             
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout when fetching {ticker} from Yahoo Finance")
+            if history.empty:
+                logger.warning(f"No price data available for {ticker}")
                 return None
-                
+            
+            # Get the latest price
+            latest = history.iloc[-1]
+            
+            return {
+                "price": float(latest['Close']),
+                "volume": int(latest['Volume']),
+                "timestamp": datetime.now(),
+                "source": self.source_name
+            }
+        
         except Exception as e:
-            if "Symbol not found" in str(e) or "not found or invalid" in str(e):
-                logger.warning(f"Ticker {ticker} not found on Yahoo Finance: {str(e)}")
-                return {"not_found": True, "source": self.source_name}
-            else:
-                logger.error(f"Error getting price for {ticker} from Yahoo Finance: {str(e)}")
-                return None
+            logger.error(f"Error getting price for {ticker}: {str(e)}")
+            return None
     
     async def get_batch_prices(self, tickers: List[str], max_batch_size: int = 100) -> Dict[str, Dict[str, Any]]:
         """
@@ -188,84 +154,78 @@ class YahooFinanceClient(MarketDataSource):
     
     async def get_company_metrics(self, ticker: str) -> Optional[Dict[str, Any]]:
         """
-        Get company metrics for a ticker (PE ratio, market cap, etc.)
-        
-        Args:
-            ticker: Ticker symbol
-            
-        Returns:
-            Dictionary with company metrics or None if unavailable
+        Get company metrics for a ticker using the successful debugging approach
         """
         try:
-            # Use a separate thread for the yfinance API call
-            loop = asyncio.get_event_loop()
+            # Fetch ticker data directly (synchronously)
+            ticker_obj = yf.Ticker(ticker)
             
-            try:
-                # Attempt to get ticker data with timeout
-                ticker_data = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: yf.Ticker(ticker)),
-                    timeout=15  # 15 second timeout
-                )
-                
-                # Get company info with timeout
-                info = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: ticker_data.info),
-                    timeout=15  # 15 second timeout
-                )
-                
-                if not info or len(info) <= 1:  # Empty dict or minimal info indicates ticker not found
-                    logger.warning(f"Ticker {ticker} not found on Yahoo Finance")
-                    return {"not_found": True, "source": self.source_name}
-                    
-                # Extract relevant fields - keeping all the original fields exactly as they were
-                return {
-                    "company_name": info.get("shortName") or info.get("longName"),
-                    "sector": info.get("sector"),
-                    "industry": info.get("industry"),
-                    "market_cap": info.get("marketCap"),
-                    "pe_ratio": info.get("trailingPE"),
-                    "dividend_yield": info.get("dividendYield"),
-                    "dividend_rate": info.get("dividendRate"),
-                    "eps": info.get("trailingEPS"),
-                    "avg_volume": info.get("averageVolume"),
-                    "source": self.source_name
-                }
-                
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout when fetching {ticker} from Yahoo Finance")
-                return None
-                
-        except KeyError as e:
-            # This often happens when the ticker exists but data is incomplete
-            logger.warning(f"KeyError for {ticker} from Yahoo Finance: {str(e)}")
+            # Get company info
+            info = ticker_obj.info
             
-            # If we have a minimal response, return what we can
-            if 'ticker_data' in locals() and hasattr(ticker_data, 'info'):
-                info = ticker_data.info
-                return {
-                    "company_name": info.get("shortName") or info.get("longName"),
-                    "sector": info.get("sector"),
-                    "industry": info.get("industry"),
-                    "market_cap": info.get("marketCap"),
-                    "pe_ratio": info.get("trailingPE"),
-                    "dividend_yield": info.get("dividendYield"),
-                    "dividend_rate": info.get("dividendRate"),
-                    "eps": info.get("trailingEPS"),
-                    "avg_volume": info.get("averageVolume"),
-                    "source": self.source_name
-                }
-            return None
-            
-        except Exception as e:
-            # Check for specific error messages that indicate invalid ticker
-            error_str = str(e).lower()
-            if any(msg in error_str for msg in ["symbol not found", "not found or invalid", "no data found"]):
-                logger.warning(f"Ticker {ticker} not found on Yahoo Finance: {str(e)}")
+            # Check if info is empty or minimal
+            if not info or len(info) <= 1:
+                logger.warning(f"Ticker {ticker} not found on Yahoo Finance")
                 return {"not_found": True, "source": self.source_name}
-            else:
-                logger.error(f"Error getting company info for {ticker}: {str(e)}")
-                return None
             
+            # Comprehensive metrics extraction
+            metrics = {
+                # Core information
+                "company_name": info.get("shortName") or info.get("longName"),
+                "ticker": ticker,
+                "source": self.source_name,
+                
+                # Basic company details
+                "sector": info.get("sector"),
+                "industry": info.get("industry"),
+                
+                # Price and valuation metrics
+                "current_price": info.get("currentPrice"),
+                "previous_close": info.get("regularMarketPreviousClose"),
+                "market_cap": info.get("marketCap"),
+                
+                # Price range metrics
+                "day_open": info.get("regularMarketOpen"),
+                "day_low": info.get("regularMarketDayLow"),
+                "day_high": info.get("regularMarketDayHigh"),
+                
+                # Volume metrics
+                "volume": info.get("volume"),
+                "average_volume": info.get("averageVolume"),
+                
+                # Pricing metrics
+                "pe_ratio": info.get("trailingPE"),
+                "forward_pe": info.get("forwardPE"),
+                
+                # Dividend metrics
+                "dividend_rate": info.get("dividendRate"),
+                "dividend_yield": info.get("dividendYield"),
+                
+                # EPS metrics
+                "eps": info.get("trailingEPS"),
+                "forward_eps": info.get("forwardEPS"),
+                
+                # Price targets
+                "target_high_price": info.get("targetHighPrice"),
+                "target_low_price": info.get("targetLowPrice"),
+                "target_mean_price": info.get("targetMeanPrice"),
+                
+                # Additional metrics
+                "beta": info.get("beta"),
+                "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
+                "fifty_two_week_high": info.get("fiftyTwoWeekHigh")
+            }
+            
+            # Remove None values to prevent database insertion issues
+            metrics = {k: v for k, v in metrics.items() if v is not None}
+            
+            logger.info(f"Metrics for {ticker}: {metrics}")
+            return metrics
+        
+        except Exception as e:
+            logger.error(f"Comprehensive error getting metrics for {ticker}: {str(e)}")
+            return None
+        
     async def get_historical_prices(self, ticker: str, start_date: datetime, end_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """
         Get historical prices for a ticker
