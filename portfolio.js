@@ -789,12 +789,34 @@ const handleAddPosition = (type) => {
     setSecuritySearch(value);
     
     if (value.length >= 2) {
-      const results = await searchSecurities(value);
-      setSearchResults(results);
-      
-      // If we got a result, use the first one's price
-      if (results.length > 0) {
-        setSecurityPrice(results[0].price);
+      try {
+        const token = localStorage.getItem("token");
+        const response = await fetch(`${apiBaseUrl}/securities/search?query=${encodeURIComponent(value)}`, {
+          headers: { 
+            "Authorization": `Bearer ${token}`,
+            "Content-Type": "application/json"
+          }
+        });
+  
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Failed to search securities: ${errorText}`);
+        }
+  
+        const data = await response.json();
+        const results = data.results || [];
+  
+        setSearchResults(results);
+  
+        // If we got a result, use the first one's price
+        if (results.length > 0) {
+          setSecurityPrice(results[0].price || 0);
+        }
+      } catch (error) {
+        console.error("Error searching securities:", error);
+        setSearchResults([]);
+        // Optional: set an error message for the user
+        setFormMessage(`Security search error: ${error.message}`);
       }
     } else {
       setSearchResults([]);
@@ -2000,8 +2022,8 @@ const handleBulkUpload = async () => {
   </div>
 )}
 
-      {/* US Securities Modal */}
-      {isUSSecuritiesModalOpen && (
+{/* US Securities Modal */}
+{isUSSecuritiesModalOpen && (
   <div className="modal-overlay modal-overlay-action">
     <div className="modal-content">
       <h2 className="modal-title">Add US Security</h2>
@@ -2030,8 +2052,20 @@ const handleBulkUpload = async () => {
                   <div>
                     <div className="font-bold">{result.ticker}</div>
                     <div className="text-sm text-gray-600">{result.name}</div>
+                    {result.sector && (
+                      <div className="text-xs text-gray-500">
+                        {result.sector} • {result.industry}
+                      </div>
+                    )}
                   </div>
-                  <div className="text-sm font-semibold">${result.price.toFixed(2)}</div>
+                  <div className="flex flex-col items-end">
+                    <div className="text-sm font-semibold">${result.price.toFixed(2)}</div>
+                    {result.marketCap && (
+                      <div className="text-xs text-gray-500">
+                        Market Cap: ${(result.marketCap / 1_000_000_000).toFixed(1)}B
+                      </div>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>

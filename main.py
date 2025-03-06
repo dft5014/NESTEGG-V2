@@ -508,34 +508,44 @@ async def delete_position(position_id: int, current_user: dict = Depends(get_cur
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Server error: {str(e)}")
 
-# Mock Stock Lookup (for development purposes)
 @app.get("/securities/search")
-async def search_securities(query: str):
-    # Mock data for common stocks
-    mock_stocks = [
-        {"ticker": "AAPL", "name": "Apple Inc.", "price": 175.43},
-        {"ticker": "MSFT", "name": "Microsoft Corporation", "price": 337.22},
-        {"ticker": "GOOGL", "name": "Alphabet Inc.", "price": 128.64},
-        {"ticker": "AMZN", "name": "Amazon.com, Inc.", "price": 136.45},
-        {"ticker": "META", "name": "Meta Platforms, Inc.", "price": 309.81},
-        {"ticker": "TSLA", "name": "Tesla, Inc.", "price": 237.49},
-        {"ticker": "NVDA", "name": "NVIDIA Corporation", "price": 423.25},
-        {"ticker": "JPM", "name": "JPMorgan Chase & Co.", "price": 147.15},
-        {"ticker": "V", "name": "Visa Inc.", "price": 240.80},
-        {"ticker": "JNJ", "name": "Johnson & Johnson", "price": 152.64}
-    ]
+async def search_securities(query: str, current_user: dict = Depends(get_current_user)):
+    """Search securities from the database"""
+    try:
+        # Case-insensitive search across ticker, company name, sector, and industry
+        search_query = """
+        SELECT 
+            ticker, 
+            company_name AS name, 
+            COALESCE(current_price, 0) AS price,
+            sector,
+            industry,
+            market_cap
+        FROM securities
+        WHERE 
+            active = true AND 
+            (
+                LOWER(ticker) LIKE LOWER(:query) OR 
+                LOWER(company_name) LIKE LOWER(:query) OR 
+                LOWER(sector) LIKE LOWER(:query) OR 
+                LOWER(industry) LIKE LOWER(:query)
+            )
+        LIMIT 10
+        """
+        
+        # Use % for LIKE pattern matching
+        search_param = f"%{query}%"
+        
+        results = await database.fetch_all(search_query, {"query": search_param})
+        
+        return {"results": [dict(result) for result in results]}
     
-    # Filter stocks based on search query
-    if not query:
-        return {"results": []}
-    
-    query = query.upper()
-    results = [
-        stock for stock in mock_stocks
-        if query in stock["ticker"] or query.lower() in stock["name"].lower()
-    ]
-    
-    return {"results": results}
+    except Exception as e:
+        logger.error(f"Error searching securities: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail=f"Failed to search securities: {str(e)}"
+        )
 
 # Portfolio Summary
 @app.get("/portfolio/summary")
