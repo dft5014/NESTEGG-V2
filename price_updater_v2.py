@@ -633,205 +633,291 @@ class PriceUpdaterV2:
             # Cleanup code
             await self.disconnect()
             
-    async def update_historical_prices(self, tickers=None, max_tickers=None, days=30) -> Dict[str, Any]:
-            """
-            Update historical prices for securities
+    async def update_historical_prices(self, tickers=None, max_tickers=None, days=30, batch_size=5) -> Dict[str, Any]:
+        """
+        Update historical prices for securities with batch processing
+        
+        Args:
+            tickers: Optional list of specific tickers to update
+            max_tickers: Maximum number of tickers to update (for testing)
+            days: Number of days of history to fetch
+            batch_size: Size of batches for API calls
             
-            Args:
-                tickers: Optional list of specific tickers to update
-                max_tickers: Maximum number of tickers to update (for testing)
-                days: Number of days of history to fetch
+        Returns:
+            Summary of updates made
+        """
+        try:
+            await self.connect()
+            
+            # Record the start of this operation
+            event_id = await record_system_event(
+                self.database, 
+                "history_update", 
+                "started", 
+                {"days": days, "tickers": tickers, "batch_size": batch_size}
+            )
+            
+            # Start timing
+            start_time = datetime.now()
+            
+            # Get tickers to update
+            if tickers:
+                # If specific tickers provided, validate they exist in the database
+                placeholders = ', '.join([f"'{ticker}'" for ticker in tickers])
+                query = f"""
+                    SELECT ticker 
+                    FROM securities 
+                    WHERE ticker IN ({placeholders})
+                """
+                result = await self.database.fetch_all(query)
+                all_tickers = [row['ticker'] for row in result]
                 
-            Returns:
-                Summary of updates made
-            """
-            try:
-                await self.connect()
+                # Check if any requested tickers don't exist
+                missing_tickers = set(tickers) - set(all_tickers)
+                if missing_tickers:
+                    logger.warning(f"Tickers not found in database: {missing_tickers}")
+            else:
+                # Otherwise get all active tickers
+                all_tickers = await self.get_active_tickers()
+            
+            # Apply max_tickers limit if specified
+            if max_tickers and len(all_tickers) > max_tickers:
+                selected_tickers = all_tickers[:max_tickers]
+            else:
+                selected_tickers = all_tickers
                 
-                # Record the start of this operation
-                event_id = await record_system_event(
-                    self.database, 
-                    "history_update", 
-                    "started", 
-                    {"days": days, "tickers": tickers}
-                )
+            logger.info(f"Updating historical prices for {len(selected_tickers)} securities ({days} days)")
+            
+            # Calculate date range
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days)
+            
+            # Track statistics
+            update_count = 0
+            unavailable_count = 0
+            price_points_added = 0
+            sources_used = set()
+            history_updates = {}
+            updated_tickers = set()
+            
+            # Process tickers in batches
+            for i in range(0, len(selected_tickers), batch_size):
+                batch_tickers = selected_tickers[i:i+batch_size]
+                logger.info(f"Processing batch {i//batch_size + 1}/{(len(selected_tickers) + batch_size - 1)//batch_size}: {batch_tickers}")
                 
-                # Start timing
-                start_time = datetime.now()
-                
-                # Get tickers to update
-                if tickers:
-                    # If specific tickers provided, validate they exist in the database
-                    placeholders = ', '.join([f"'{ticker}'" for ticker in tickers])
-                    query = f"""
-                        SELECT ticker 
-                        FROM securities 
-                        WHERE ticker IN ({placeholders})
-                    """
-                    result = await self.database.fetch_all(query)
-                    all_tickers = [row['ticker'] for row in result]
-                    
-                    # Check if any requested tickers don't exist
-                    missing_tickers = set(tickers) - set(all_tickers)
-                    if missing_tickers:
-                        logger.warning(f"Tickers not found in database: {missing_tickers}")
-                else:
-                    # Otherwise get all active tickers
-                    all_tickers = await self.get_active_tickers()
-                
-                # Apply max_tickers limit if specified
-                if max_tickers and len(all_tickers) > max_tickers:
-                    selected_tickers = all_tickers[:max_tickers]
-                else:
-                    selected_tickers = all_tickers
-                    
-                logger.info(f"Updating historical prices for {len(selected_tickers)} securities ({days} days)")
-                
-                # Calculate date range
-                end_date = datetime.now()
-                start_date = end_date - timedelta(days=days)
-                
-                # Track statistics
-                update_count = 0
-                unavailable_count = 0
-                price_points_added = 0
-                sources_used = set()
-                history_updates = {}
-                updated_tickers = set()
-                
-                # Process each ticker individually
-                for ticker in selected_tickers:
-                    try:
-                        # Get historical prices
-                        historical_data = await self.market_data.get_historical_prices(ticker, start_date, end_date)
-                        
-                        if not historical_data:
-                            logger.warning(f"No historical data available for {ticker}")
-                            unavailable_count += 1
-                            continue
-                        
-                        # Track the source that was used
-                        for point in historical_data:
-                            if "source" in point:
-                                sources_used.add(point["source"])
-                                break
-                        
-                        ticker_points = 0
-                        # Process each data point
-                        for point in historical_data:
-                            try:
-                                # Insert or update price history record
-                                # Fix in the update_historical_prices method
-                                await self.database.execute(
-                                    """
-                                    INSERT INTO price_history 
-                                    (ticker, close_price, day_open, day_high, day_low, volume, timestamp, date, source)
-                                    VALUES (:ticker, :close, :day_open, :day_high, :day_low, :volume, :timestamp, :date, :source)
-                                    ON CONFLICT (ticker, date) DO UPDATE
-                                    SET 
-                                        close_price = :close,
-                                        day_open = :day_open,
-                                        day_high = :day_high,
-                                        day_low = :day_low,
-                                        volume = :volume,
-                                        timestamp = :timestamp,
-                                        source = :source
-                                    """,
-                                    {
-                                        "ticker": ticker,
-                                        "close": point.get("close"),
-                                        "day_open": point.get("open"),
-                                        "day_high": point.get("high"),
-                                        "day_low": point.get("low"),
-                                        "volume": point.get("volume"),
-                                        "timestamp": point.get("timestamp") or datetime.utcnow(),
-                                        "date": point.get("date"),
-                                        "source": point.get("source", "unknown")
-                                    }
-                                )
-                                
-                                price_points_added += 1
-                                ticker_points += 1
-                                
-                            except Exception as point_error:
-                                logger.error(f"Error adding historical price for {ticker} on {point.get('date')}: {str(point_error)}")
-                        
-                        # Store summary for this ticker
-                        history_updates[ticker] = {
-                            "points_added": ticker_points,
-                            "date_range": {
-                                "start": start_date.isoformat(),
-                                "end": end_date.isoformat()
-                            }
-                        }
-                        
-                        # Update security's last_backfilled timestamp
-                        await self.database.execute(
-                            """
-                            UPDATE securities 
-                            SET last_backfilled = :timestamp
-                            WHERE ticker = :ticker
-                            """,
-                            {
-                                "ticker": ticker,
-                                "timestamp": datetime.utcnow()
-                            }
+                try:
+                    # Get historical data in batch if Yahoo Finance client supports it
+                    yahoo_client = self.market_data.sources.get("yahoo_finance")
+                    if hasattr(yahoo_client, "get_batch_historical_prices"):
+                        # Use batch method if available
+                        batch_results = await yahoo_client.get_batch_historical_prices(
+                            batch_tickers, start_date, end_date
                         )
+                        sources_used.add("yahoo_finance")
                         
-                        updated_tickers.add(ticker)
-                        update_count += 1
-                        
-                    except Exception as e:
-                        logger.error(f"Error updating historical prices for {ticker}: {str(e)}")
-                        unavailable_count += 1
+                        # Process each ticker's results from the batch
+                        for ticker, ticker_data in batch_results.items():
+                            if not ticker_data:
+                                logger.warning(f"No historical data available for {ticker} in batch")
+                                unavailable_count += 1
+                                continue
+                                
+                            ticker_points = 0
+                            # Process each data point
+                            for point in ticker_data:
+                                try:
+                                    # Insert or update price history record
+                                    await self.database.execute(
+                                        """
+                                        INSERT INTO price_history 
+                                        (ticker, close_price, day_open, day_high, day_low, volume, timestamp, date, source)
+                                        VALUES (:ticker, :close_price, :day_open, :day_high, :day_low, :volume, :timestamp, :date, :source)
+                                        ON CONFLICT (ticker, date) DO UPDATE
+                                        SET 
+                                            close_price = :close_price,
+                                            day_open = :day_open,
+                                            day_high = :day_high,
+                                            day_low = :day_low,
+                                            volume = :volume,
+                                            timestamp = :timestamp,
+                                            source = :source
+                                        """,
+                                        {
+                                            "ticker": ticker,
+                                            "close_price": point.get("close_price"),
+                                            "day_open": point.get("day_open"),
+                                            "day_high": point.get("day_high"),
+                                            "day_low": point.get("day_low"),
+                                            "volume": point.get("volume"),
+                                            "timestamp": point.get("timestamp") or datetime.utcnow(),
+                                            "date": point.get("date"),
+                                            "source": point.get("source", "unknown")
+                                        }
+                                    )                        
+                                    price_points_added += 1
+                                    ticker_points += 1
+                                    
+                                except Exception as point_error:
+                                    logger.error(f"Error adding historical price for {ticker} on {point.get('date')}: {str(point_error)}")
+                            
+                            # Store summary for this ticker
+                            history_updates[ticker] = {
+                                "points_added": ticker_points,
+                                "date_range": {
+                                    "start": start_date.isoformat(),
+                                    "end": end_date.isoformat()
+                                }
+                            }
+                            
+                            # Update security's last_backfilled timestamp
+                            await self.database.execute(
+                                """
+                                UPDATE securities 
+                                SET last_backfilled = :timestamp
+                                WHERE ticker = :ticker
+                                """,
+                                {
+                                    "ticker": ticker,
+                                    "timestamp": datetime.utcnow()
+                                }
+                            )
+                            
+                            updated_tickers.add(ticker)
+                            update_count += 1
+                    else:
+                        # Fall back to individual processing if batch method not available
+                        for ticker in batch_tickers:
+                            # Process individual ticker (using existing method)
+                            historical_data = await self.market_data.get_historical_prices(ticker, start_date, end_date)
+                            
+                            if not historical_data:
+                                logger.warning(f"No historical data available for {ticker}")
+                                unavailable_count += 1
+                                continue
+                            
+                            # Track the source that was used
+                            for point in historical_data:
+                                if "source" in point:
+                                    sources_used.add(point["source"])
+                                    break
+                            
+                            ticker_points = 0
+                            # Process each data point
+                            for point in historical_data:
+                                try:
+                                    # Insert or update price history record
+                                    await self.database.execute(
+                                        """
+                                        INSERT INTO price_history 
+                                        (ticker, close_price, day_open, day_high, day_low, volume, timestamp, date, source)
+                                        VALUES (:ticker, :close_price, :day_open, :day_high, :day_low, :volume, :timestamp, :date, :source)
+                                        ON CONFLICT (ticker, date) DO UPDATE
+                                        SET 
+                                            close_price = :close_price,
+                                            day_open = :day_open,
+                                            day_high = :day_high,
+                                            day_low = :day_low,
+                                            volume = :volume,
+                                            timestamp = :timestamp,
+                                            source = :source
+                                        """,
+                                        {
+                                            "ticker": ticker,
+                                            "close_price": point.get("close_price"),
+                                            "day_open": point.get("day_open"),
+                                            "day_high": point.get("day_high"),
+                                            "day_low": point.get("day_low"),
+                                            "volume": point.get("volume"),
+                                            "timestamp": point.get("timestamp") or datetime.utcnow(),
+                                            "date": point.get("date"),
+                                            "source": point.get("source", "unknown")
+                                        }
+                                    )                        
+                                    price_points_added += 1
+                                    ticker_points += 1
+                                    
+                                except Exception as point_error:
+                                    logger.error(f"Error adding historical price for {ticker} on {point.get('date')}: {str(point_error)}")
+                            
+                            # Store summary for this ticker
+                            history_updates[ticker] = {
+                                "points_added": ticker_points,
+                                "date_range": {
+                                    "start": start_date.isoformat(),
+                                    "end": end_date.isoformat()
+                                }
+                            }
+                            
+                            # Update security's last_backfilled timestamp
+                            await self.database.execute(
+                                """
+                                UPDATE securities 
+                                SET last_backfilled = :timestamp
+                                WHERE ticker = :ticker
+                                """,
+                                {
+                                    "ticker": ticker,
+                                    "timestamp": datetime.utcnow()
+                                }
+                            )
+                            
+                            updated_tickers.add(ticker)
+                            update_count += 1
                 
-                # Calculate duration
-                duration = (datetime.now() - start_time).total_seconds()
+                except Exception as batch_error:
+                    logger.error(f"Error processing batch: {str(batch_error)}")
+                    # Continue with the next batch
                 
-                # Record completion
-                result = {
-                    "total_tickers": len(selected_tickers),
-                    "updated_count": update_count,
-                    "unavailable_count": unavailable_count,
-                    "price_points_added": price_points_added,
-                    "sources_used": list(sources_used),
-                    "history_updates": history_updates,
-                    "duration_seconds": duration
-                }
+                # Small delay between batches to avoid rate limiting
+                await asyncio.sleep(1)
+            
+            # Calculate duration
+            duration = (datetime.now() - start_time).total_seconds()
+            
+            # Record completion
+            result = {
+                "total_tickers": len(selected_tickers),
+                "updated_count": update_count,
+                "unavailable_count": unavailable_count,
+                "price_points_added": price_points_added,
+                "sources_used": list(sources_used),
+                "history_updates": history_updates,
+                "duration_seconds": duration
+            }
+            
+            await update_system_event(
+                self.database,
+                event_id,
+                "completed",
+                result
+            )
+            
+            # After successful update, invalidate relevant caches
+            if FastCache.is_available():
+                # Invalidate security history caches
+                for ticker in updated_tickers:
+                    FastCache.delete(f"security_history:{ticker}*")
                 
+                logger.info(f"Invalidated historical data cache for {len(updated_tickers)} securities")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error updating historical prices: {str(e)}")
+            
+            # Record failure
+            if event_id:
                 await update_system_event(
                     self.database,
                     event_id,
-                    "completed",
-                    result
+                    "failed",
+                    {"error": str(e)},
+                    str(e)
                 )
-                
-                # After successful update, invalidate relevant caches
-                if FastCache.is_available():
-                    # Invalidate security history caches
-                    for ticker in updated_tickers:
-                        FastCache.delete(f"security_history:{ticker}*")
-                    
-                    logger.info(f"Invalidated historical data cache for {len(updated_tickers)} securities")
-                
-                return result
-                
-            except Exception as e:
-                logger.error(f"Error updating historical prices: {str(e)}")
-                
-                # Record failure
-                if event_id:
-                    await update_system_event(
-                        self.database,
-                        event_id,
-                        "failed",
-                        {"error": str(e)},
-                        str(e)
-                    )
-                
-                raise
-            finally:
-                await self.disconnect()
+            
+            raise
+        finally:
+            await self.disconnect()
 
     async def smart_update(self, update_type="all", max_tickers=None) -> Dict[str, Any]:
             """
@@ -984,44 +1070,50 @@ class PriceUpdaterV2:
                 await self.disconnect()
 
 # Standalone execution function
-async def run_price_update(update_type: str = "prices", max_tickers: int = None, tickers_list: List[str] = None):
-            updater = PriceUpdaterV2()
-            try:
-                result = None
-                
-                if update_type == "prices":
-                    result = await updater.update_security_prices(tickers=tickers_list, max_tickers=max_tickers)
-                    print(f"Price update complete: {result}")
-                elif update_type == "metrics":
-                    result = await updater.update_company_metrics(tickers=tickers_list, max_tickers=max_tickers)
-                    print(f"Metrics update complete: {result}")
-                elif update_type == "history":
-                    # Default to 30 days of history
-                    result = await updater.update_historical_prices(tickers=tickers_list, max_tickers=max_tickers, days=30)
-                    print(f"Historical price update complete: {result}")
-                elif update_type == "smart":
-                    # Smart update that prioritizes what needs updating most
-                    result = await updater.smart_update(update_type="all", max_tickers=max_tickers)
-                    print(f"Smart update complete: {result}")
-                else:
-                    print(f"Unknown update type: {update_type}")
-                    
-            except Exception as e:
-                print(f"Update failed: {str(e)}")
+async def run_price_update(update_type: str = "prices", max_tickers: int = None, tickers_list: List[str] = None, days: int = 30):
+    updater = PriceUpdaterV2()
+    try:
+        result = None
+        
+        if update_type == "prices":
+            result = await updater.update_security_prices(tickers=tickers_list, max_tickers=max_tickers)
+            print(f"Price update complete: {result}")
+        elif update_type == "metrics":
+            result = await updater.update_company_metrics(tickers=tickers_list, max_tickers=max_tickers)
+            print(f"Metrics update complete: {result}")
+        elif update_type == "history":
+            # Pass the days parameter to update_historical_prices
+            result = await updater.update_historical_prices(tickers=tickers_list, max_tickers=max_tickers, days=days)
+            print(f"Historical price update complete: {result}")
+        elif update_type == "smart":
+            # Smart update that prioritizes what needs updating most
+            result = await updater.smart_update(update_type="all", max_tickers=max_tickers)
+            print(f"Smart update complete: {result}")
+        else:
+            print(f"Unknown update type: {update_type}")
+            
+    except Exception as e:
+        print(f"Update failed: {str(e)}")
 
 if __name__ == "__main__":
-        import argparse
-        
-        parser = argparse.ArgumentParser(description="NestEgg Market Data Updater")
-        parser.add_argument("--type", choices=["prices", "metrics", "history", "smart"], default="smart", help="Type of update to perform")
-        parser.add_argument("--max", type=int, help="Maximum number of tickers to process")
-        parser.add_argument("--tickers", type=str, help="Comma-separated list of tickers to update")
-        
-        args = parser.parse_args()
-        
-        # Handle tickers argument
-        tickers_list = None
-        if args.tickers:
-            tickers_list = [ticker.strip().upper() for ticker in args.tickers.split(',')]
-        
-        asyncio.run(run_price_update(args.type, args.max, tickers_list))  # Pass tickers_list here
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="NestEgg Market Data Updater")
+    parser.add_argument("--type", choices=["prices", "metrics", "history", "smart"], default="smart", help="Type of update to perform")
+    parser.add_argument("--max", type=int, help="Maximum number of tickers to process")
+    parser.add_argument("--tickers", type=str, help="Comma-separated list of tickers to update")
+    parser.add_argument("--days", type=int, default=30, help="Number of days of history to fetch (for history updates)")
+    parser.add_argument("--batch-size", type=int, default=5, help="Batch size for API calls (for batched operations)")
+    
+    args = parser.parse_args()
+    
+    # Handle tickers argument
+    tickers_list = None
+    if args.tickers:
+        tickers_list = [ticker.strip().upper() for ticker in args.tickers.split(',')]
+    
+    # Pass the days parameter when calling run_price_update
+    if args.type == "history":
+        asyncio.run(run_price_update(args.type, args.max, tickers_list, days=args.days))
+    else:
+        asyncio.run(run_price_update(args.type, args.max, tickers_list))

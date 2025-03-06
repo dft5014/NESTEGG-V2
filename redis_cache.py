@@ -54,12 +54,23 @@ class RedisCache:
                     db=REDIS_DB,
                     password=REDIS_PASSWORD,
                     decode_responses=False,  # We'll handle decoding ourselves
-                    socket_timeout=5,
-                    socket_connect_timeout=5
+                    socket_timeout=2,  # Reduce timeout for faster failure detection
+                    socket_connect_timeout=2,
+                    retry_on_timeout=False  # Don't retry if connection times out
                 )
                 logger.info(f"Redis cache initialized: {REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}")
+                
+                # Test connection immediately but don't fail if it doesn't work
+                try:
+                    self.client.ping()
+                except Exception as e:
+                    logger.warning(f"Redis connectivity test failed on init: {str(e)}")
+                    logger.info("Continuing without Redis - cache operations will be no-ops")
+                    # Keep the object but disable it
+                    self.enabled = False
             except Exception as e:
-                logger.error(f"Failed to initialize Redis cache: {str(e)}")
+                logger.warning(f"Failed to initialize Redis cache: {str(e)}")
+                logger.info("Continuing without Redis - cache operations will be no-ops")
                 self.enabled = False
     
     def is_available(self) -> bool:

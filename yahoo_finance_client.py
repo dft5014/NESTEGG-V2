@@ -390,18 +390,205 @@ class YahooFinanceClient(MarketDataSource):
             logger.error(f"Comprehensive error getting metrics for {ticker}: {str(e)}")
             return None
         
-    async def get_historical_prices(self, ticker: str, start_date: datetime, end_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    async def get_batch_historical_prices(self, tickers: List[str], start_date: datetime, end_date: Optional[datetime] = None, max_batch_size: int = 5) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Get historical prices for a ticker
+        Get historical prices for multiple tickers in batches
         
         Args:
-            ticker: Ticker symbol
+            tickers: List of ticker symbols
             start_date: Start date for historical data
             end_date: End date for historical data (defaults to today)
+            max_batch_size: Maximum number of tickers per batch (smaller is safer)
             
         Returns:
-            List of historical price data points
+            Dictionary mapping tickers to their historical price data lists
         """
+        if not tickers:
+            return {}
+            
+        # Use current date if end_date not provided
+        if not end_date:
+            end_date = datetime.now()
+            
+        # Convert dates to strings in the format required by yfinance
+        start_str = start_date.strftime("%Y-%m-%d")
+        end_str = end_date.strftime("%Y-%m-%d")
+        
+        results = {}
+        
+        # Process in smaller batches to avoid overloading
+        for i in range(0, len(tickers), max_batch_size):
+            batch = tickers[i:i+max_batch_size]
+            batch_str = " ".join(batch)
+            
+            
+            try:
+                logger.info(f"Fetching historical data for batch: {batch_str}")
+                
+                # Use a separate thread for the yfinance API call
+                loop = asyncio.get_event_loop()
+                history = await loop.run_in_executor(
+                    None,
+                    lambda: yf.download(batch_str, start=start_str, end=end_str, group_by="ticker")
+                )
+                
+                # Check if we got any data
+                if hasattr(history, 'empty') and history.empty:
+                    logger.warning(f"No historical data available for batch: {batch_str}")
+                    continue
+                    
+                # If only one ticker, the data structure is different
+                if len(batch) == 1:
+                    ticker = batch[0]
+                    ticker_results = []
+                    
+                    # Process the data for this single ticker
+                    try:
+                        for date, row in history.iterrows():
+                            try:
+                                # Extract values safely using loc and handle potential Series objects
+                                # For Open column
+                                if 'Open' in row.index:
+                                    value = row.loc['Open']
+                                    # Handle if value is still a Series
+                                    if hasattr(value, 'iloc'):
+                                        value = value.iloc[0]
+                                    day_open = float(value) if not pd.isna(value) else None
+                                else:
+                                    day_open = None
+                                
+                                # For High column
+                                if 'High' in row.index:
+                                    value = row.loc['High']
+                                    if hasattr(value, 'iloc'):
+                                        value = value.iloc[0]
+                                    day_high = float(value) if not pd.isna(value) else None
+                                else:
+                                    day_high = None
+                                
+                                # For Low column
+                                if 'Low' in row.index:
+                                    value = row.loc['Low']
+                                    if hasattr(value, 'iloc'):
+                                        value = value.iloc[0]
+                                    day_low = float(value) if not pd.isna(value) else None
+                                else:
+                                    day_low = None
+                                
+                                # For Close column
+                                if 'Close' in row.index:
+                                    value = row.loc['Close']
+                                    if hasattr(value, 'iloc'):
+                                        value = value.iloc[0]
+                                    close_price = float(value) if not pd.isna(value) else None
+                                else:
+                                    close_price = None
+                                
+                                # For Volume column
+                                if 'Volume' in row.index:
+                                    value = row.loc['Volume']
+                                    if hasattr(value, 'iloc'):
+                                        value = value.iloc[0]
+                                    volume = int(value) if not pd.isna(value) else None
+                                else:
+                                    volume = None
+                                
+                                if close_price is not None:
+                                    ticker_results.append({
+                                        "date": date.date(),
+                                        "timestamp": date.to_pydatetime(),
+                                        "day_open": day_open,
+                                        "day_high": day_high,
+                                        "day_low": day_low,
+                                        "close_price": close_price,
+                                        "volume": volume,
+                                        "source": self.source_name
+                                    })
+                            except Exception as row_error:
+                                logger.warning(f"Error processing row for {ticker} on {date}: {str(row_error)}")
+                        
+                        results[ticker] = ticker_results
+                        logger.info(f"Processed {len(ticker_results)} historical points for {ticker}")
+                    except Exception as ticker_error:
+                        logger.error(f"Error processing historical data for {ticker}: {str(ticker_error)}")
+                else:
+                    # Multi-ticker case - data is grouped by ticker
+                    for ticker in batch:
+                        # Check if ticker data exists in the DataFrame
+                        if ticker in history.columns.levels[0]:
+                            ticker_data = history[ticker]
+                            ticker_results = []
+                            
+                            try:
+                                for date, row in ticker_data.iterrows():
+                                    try:
+                                        # Extract values safely
+                                        close_value = row['Close'] if 'Close' in row else None
+                                        # Handle if close_value is a Series
+                                        if hasattr(close_value, 'iloc') or hasattr(close_value, 'values'):
+                                            try:
+                                                close_value = close_value.iloc[0] if hasattr(close_value, 'iloc') else close_value.values[0]
+                                            except:
+                                                close_value = None
+                                        
+                                        # Only proceed if we have a valid close price
+                                        if close_value is not None and not pd.isna(close_value):
+                                            close_price = float(close_value)
+                                            
+                                            # Extract other values with the same approach
+                                            open_value = row['Open'] if 'Open' in row else None
+                                            if hasattr(open_value, 'iloc') or hasattr(open_value, 'values'):
+                                                open_value = open_value.iloc[0] if hasattr(open_value, 'iloc') else open_value.values[0]
+                                            day_open = float(open_value) if open_value is not None and not pd.isna(open_value) else None
+                                            
+                                            high_value = row['High'] if 'High' in row else None
+                                            if hasattr(high_value, 'iloc') or hasattr(high_value, 'values'):
+                                                high_value = high_value.iloc[0] if hasattr(high_value, 'iloc') else high_value.values[0]
+                                            day_high = float(high_value) if high_value is not None and not pd.isna(high_value) else None
+                                            
+                                            low_value = row['Low'] if 'Low' in row else None
+                                            if hasattr(low_value, 'iloc') or hasattr(low_value, 'values'):
+                                                low_value = low_value.iloc[0] if hasattr(low_value, 'iloc') else low_value.values[0]
+                                            day_low = float(low_value) if low_value is not None and not pd.isna(low_value) else None
+                                            
+                                            volume_value = row['Volume'] if 'Volume' in row else None
+                                            if hasattr(volume_value, 'iloc') or hasattr(volume_value, 'values'):
+                                                volume_value = volume_value.iloc[0] if hasattr(volume_value, 'iloc') else volume_value.values[0]
+                                            volume = int(volume_value) if volume_value is not None and not pd.isna(volume_value) else None
+                                            
+                                            ticker_results.append({
+                                                "date": date.date(),
+                                                "timestamp": date.to_pydatetime(),
+                                                "day_open": day_open,
+                                                "day_high": day_high,
+                                                "day_low": day_low,
+                                                "close_price": close_price,
+                                                "volume": volume,
+                                                "source": self.source_name
+                                            })
+                                    except Exception as row_error:
+                                        logger.warning(f"Error processing row for {ticker} on {date}: {str(row_error)}")
+                                
+                                if ticker_results:
+                                    results[ticker] = ticker_results
+                                    logger.info(f"Processed {len(ticker_results)} historical points for {ticker}")
+                                else:
+                                    logger.warning(f"No valid price data extracted for {ticker}")
+                            except Exception as ticker_error:
+                                logger.error(f"Error processing historical data for {ticker}: {str(ticker_error)}")
+                        else:
+                            logger.warning(f"No data returned for {ticker} in batch")
+                
+                # Add a short delay between batches
+                await asyncio.sleep(1)
+                
+            except Exception as batch_error:
+                logger.error(f"Error processing historical batch {batch_str}: {str(batch_error)}")
+                # Continue to the next batch
+        
+        return results
+        
+    async def get_historical_prices(self, ticker: str, start_date: datetime, end_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
         try:
             # Use current date if end_date not provided
             if not end_date:
@@ -418,26 +605,85 @@ class YahooFinanceClient(MarketDataSource):
                 lambda: yf.download(ticker, start=start_str, end=end_str)
             )
             
-            if history.empty:
+            # Explicitly check if the DataFrame is empty using the .empty attribute
+            if hasattr(history, 'empty') and history.empty:
                 logger.warning(f"No historical data available for {ticker} from {start_str} to {end_str}")
                 return []
             
             # Convert to list of dictionaries
             results = []
+            
+            # Use a safer iterrows approach which avoids Series ambiguity issues
             for date, row in history.iterrows():
-                results.append({
-                    "date": date.date(),
-                    "timestamp": date.to_pydatetime(),
-                    "open": float(row["Open"]) if "Open" in row and not pd.isna(row["Open"]) else None,
-                    "high": float(row["High"]) if "High" in row and not pd.isna(row["High"]) else None,
-                    "low": float(row["Low"]) if "Low" in row and not pd.isna(row["Low"]) else None,
-                    "close": float(row["Close"]) if "Close" in row and not pd.isna(row["Close"]) else None,
-                    "volume": int(row["Volume"]) if "Volume" in row and not pd.isna(row["Volume"]) else None,
-                    "source": self.source_name
-                })
+                try:
+                    # Process each column individually to avoid Series ambiguity
+                    # Extract scalar values directly
+                    
+                    # For Open column
+                    if 'Open' in row.index:
+                        value = row.loc['Open']
+                        # Handle if value is still a Series (unlikely with iterrows but being safe)
+                        if hasattr(value, 'iloc'):
+                            value = value.iloc[0]
+                        day_open = float(value) if not pd.isna(value) else None
+                    else:
+                        day_open = None
+                    
+                    # For High column
+                    if 'High' in row.index:
+                        value = row.loc['High']
+                        if hasattr(value, 'iloc'):
+                            value = value.iloc[0]
+                        day_high = float(value) if not pd.isna(value) else None
+                    else:
+                        day_high = None
+                    
+                    # For Low column
+                    if 'Low' in row.index:
+                        value = row.loc['Low']
+                        if hasattr(value, 'iloc'):
+                            value = value.iloc[0]
+                        day_low = float(value) if not pd.isna(value) else None
+                    else:
+                        day_low = None
+                    
+                    # For Close column
+                    if 'Close' in row.index:
+                        value = row.loc['Close']
+                        if hasattr(value, 'iloc'):
+                            value = value.iloc[0]
+                        close_price = float(value) if not pd.isna(value) else None
+                    else:
+                        close_price = None
+                    
+                    # For Volume column
+                    if 'Volume' in row.index:
+                        value = row.loc['Volume']
+                        if hasattr(value, 'iloc'):
+                            value = value.iloc[0]
+                        volume = int(value) if not pd.isna(value) else None
+                    else:
+                        volume = None
+                    
+                    # Only add data points with valid prices
+                    if close_price is not None:
+                        results.append({
+                            "date": date.date(),
+                            "timestamp": date.to_pydatetime(),
+                            "day_open": day_open,
+                            "day_high": day_high,
+                            "day_low": day_low,
+                            "close_price": close_price,
+                            "volume": volume,
+                            "source": self.source_name
+                        })
+                except Exception as row_error:
+                    logger.warning(f"Error processing row for date {date} for {ticker}: {str(row_error)}")
+                    # Continue to next row
             
+            if results:
+                logger.info(f"Successfully processed {len(results)} historical data points for {ticker}")
             return results
-            
         except Exception as e:
             logger.error(f"Error getting historical data for {ticker}: {str(e)}")
             return []
