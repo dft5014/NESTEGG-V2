@@ -41,7 +41,7 @@ class YahooFinanceClient(MarketDataSource):
     
     async def get_current_price(self, ticker: str) -> Optional[Dict[str, Any]]:
         """
-        Get current price using the same approach
+        Get current price for a single ticker
         """
         try:
             # Fetch ticker data
@@ -50,6 +50,12 @@ class YahooFinanceClient(MarketDataSource):
             # Get historical data
             history = ticker_obj.history(period="1d")
             
+            # Add detailed logging
+           # logger.info(f"Raw data from yfinance for single ticker {ticker}:")
+           # logger.info(f"Data shape: {history.shape}")
+           # logger.info(f"Data columns: {history.columns}")
+           # logger.info(f"Data types: {history.dtypes}")
+            
             if history.empty:
                 logger.warning(f"No price data available for {ticker}")
                 return None
@@ -57,12 +63,36 @@ class YahooFinanceClient(MarketDataSource):
             # Get the latest price
             latest = history.iloc[-1]
             
-            return {
+            # Log all values from the latest row
+           # logger.info(f"Latest data row for {ticker}: {latest}")
+           # logger.info(f"Close: {latest.get('Close', 'N/A') if 'Close' in latest else 'Column not found'}")
+           # logger.info(f"Open: {latest.get('Open', 'N/A') if 'Open' in latest else 'Column not found'}")
+           # logger.info(f"High: {latest.get('High', 'N/A') if 'High' in latest else 'Column not found'}")
+           # logger.info(f"Low: {latest.get('Low', 'N/A') if 'Low' in latest else 'Column not found'}")
+           # logger.info(f"Volume: {latest.get('Volume', 'N/A') if 'Volume' in latest else 'Column not found'}")
+            
+            # Extract the actual date from the index
+            price_date = history.index[-1]
+            logger.info(f"Price date from index: {price_date}")
+            
+            # Create the return data
+            result = {
                 "price": float(latest['Close']),
-                "volume": int(latest['Volume']),
+                "day_open": float(latest['Open']) if 'Open' in latest else None,
+                "day_high": float(latest['High']) if 'High' in latest else None,
+                "day_low": float(latest['Low']) if 'Low' in latest else None,
+                "close_price": float(latest['Close']),
+                "volume": int(latest['Volume']) if 'Volume' in latest else None,
                 "timestamp": datetime.now(),
+                "price_timestamp": price_date,
+                "price_timestamp_str": price_date.strftime("%Y-%m-%d %H:%M:%S"),
                 "source": self.source_name
             }
+            
+            # Log the final result dict being returned
+            logger.info(f"Returning data for {ticker}: {result}")
+            
+            return result
         
         except Exception as e:
             logger.error(f"Error getting price for {ticker}: {str(e)}")
@@ -79,6 +109,8 @@ class YahooFinanceClient(MarketDataSource):
         Returns:
             Dictionary mapping tickers to their price data
         """
+        logger.info(f"Starting batch request for: {tickers}")
+
         if not tickers:
             return {}
             
@@ -94,62 +126,188 @@ class YahooFinanceClient(MarketDataSource):
                 loop = asyncio.get_event_loop()
                 
                 # Download data for the batch
+                logger.info(f"Requesting data for: {batch_str}")
                 data = await loop.run_in_executor(
                     None,
                     lambda: yf.download(batch_str, period="1d", group_by="ticker")
                 )
                 
+              #  logger.info(f"Received data type: {type(data)}")
+              #  logger.info(f"Data is empty: {data.empty if hasattr(data, 'empty') else 'N/A'}")
+              #  logger.info(f"Data shape: {data.shape if hasattr(data, 'shape') else 'No shape'}")
+              #  logger.info(f"Data columns: {list(data.columns) if hasattr(data, 'columns') else 'No columns'}")
+                
                 # Process results
                 if len(batch) == 1:
                     # Handle single ticker case where data is not grouped
                     ticker = batch[0]
+                    logger.info(f"Processing single ticker: {ticker}")
+                    
                     if not data.empty:
-                        latest = data.iloc[-1]
-                        results[ticker] = {
-                            "price": float(latest["Close"]),
-                            "timestamp": datetime.now(),
-                            "volume": int(latest["Volume"]) if "Volume" in latest else None,
-                            "source": self.source_name
-                        }
+                        try:
+                            latest = data.iloc[-1]
+                            price_date = data.index[-1]  # Get the actual date from Yahoo
+                            
+                            # Debug info
+                           # logger.info(f"Latest row for {ticker}: {latest}")
+                           # logger.info(f"Price date: {price_date}")
+                           # logger.info(f"Data columns: {data.columns}")
+                           # logger.info(f"Data types: {data.dtypes}")
+                            
+                            # Check if we have a multi-index DataFrame
+                            is_multi_index = isinstance(data.columns, pd.MultiIndex)
+                            
+                            # Log each OHLCV value specifically based on structure
+                            if is_multi_index:
+                                # Multi-index case - access with (ticker, field) pattern
+                                open_value = latest.get((ticker, 'Open'), 0)
+                                high_value = latest.get((ticker, 'High'), 0)
+                                low_value = latest.get((ticker, 'Low'), 0)
+                                close_price = latest.get((ticker, 'Close'), None)
+                                volume_value = latest.get((ticker, 'Volume'), 0)
+                                
+                               # logger.info(f"Multi-index Open value: {open_value}")
+                               # logger.info(f"Multi-index High value: {high_value}")
+                               # logger.info(f"Multi-index Low value: {low_value}")
+                               # logger.info(f"Multi-index Close value: {close_price}")
+                               # logger.info(f"Multi-index Volume value: {volume_value}")
+                            else:
+                                # Single-index case - direct access
+                                open_value = latest.get('Open', 0) if 'Open' in latest else 0
+                                high_value = latest.get('High', 0) if 'High' in latest else 0
+                                low_value = latest.get('Low', 0) if 'Low' in latest else 0
+                                close_price = latest.get('Close', None) if 'Close' in latest else None
+                                volume_value = latest.get('Volume', 0) if 'Volume' in latest else 0
+                                
+                              #  logger.info(f"Open value: {open_value}")
+                              #  logger.info(f"High value: {high_value}")
+                              #  logger.info(f"Low value: {low_value}")
+                              #  logger.info(f"Close value: {close_price}")
+                              #  logger.info(f"Volume value: {volume_value}")
+                            
+                            if close_price is not None:
+                                logger.info(f"Extracted values: Open={open_value}, High={high_value}, Low={low_value}, Close={close_price}, Volume={volume_value}")
+                                
+                                # Create result dictionary
+                                result_dict = {
+                                    "price": float(close_price),
+                                    "day_open": float(open_value),
+                                    "day_high": float(high_value),
+                                    "day_low": float(low_value),
+                                    "close_price": float(close_price),
+                                    "volume": int(volume_value) if volume_value else 0,
+                                    "timestamp": datetime.now(),
+                                    "price_timestamp": price_date,
+                                    "price_timestamp_str": price_date.strftime("%Y-%m-%d %H:%M:%S"),
+                                    "source": self.source_name
+                                }
+                                
+                                logger.info(f"Result dictionary for {ticker}: {result_dict}")
+                                results[ticker] = result_dict
+                        except Exception as e:
+                            logger.error(f"Error processing batch data for {ticker}: {str(e)}")
+                            import traceback
+                            logger.error(traceback.format_exc())
                 else:
                     # Handle multi-ticker case where data is grouped by ticker
+                    logger.info(f"Processing multi-ticker batch: {batch}")
+                    
+                    # Log the structure of the multi-index dataframe
+                  #  logger.info(f"Column index levels: {data.columns.nlevels}")
+                  #  logger.info(f"Column index values: {[idx for idx in data.columns]}")
+                    
                     for ticker in batch:
                         if ticker in data and not data[ticker].empty:
+                            logger.info(f"Processing ticker in batch: {ticker}")
+                            
                             ticker_data = data[ticker]
                             latest = ticker_data.iloc[-1]
+                            price_date = ticker_data.index[-1]
+                            
+                            logger.info(f"Latest row for {ticker}: {latest}")
+                            logger.info(f"Data columns for {ticker}: {ticker_data.columns}")
                             
                             # Ensure Close is available
                             if "Close" in latest:
                                 close_price = latest["Close"]
+                                logger.info(f"{ticker} Close: {close_price} (type: {type(close_price)})")
+                                
                                 # Handle the case where Close might be a Series
                                 if hasattr(close_price, "iloc"):
+                                    logger.info(f"{ticker} Close is a Series, accessing first element")
                                     close_price = close_price.iloc[0]
+                                    logger.info(f"{ticker} Close after iloc: {close_price}")
                                 
-                                results[ticker] = {
+                                # Handle other price columns that might be Series
+                                open_price = latest["Open"]
+                                logger.info(f"{ticker} Open: {open_price} (type: {type(open_price)})")
+                                if hasattr(open_price, "iloc"):
+                                    open_price = open_price.iloc[0]
+                                    
+                                high_price = latest["High"]
+                                logger.info(f"{ticker} High: {high_price} (type: {type(high_price)})")
+                                if hasattr(high_price, "iloc"):
+                                    high_price = high_price.iloc[0]
+                                    
+                                low_price = latest["Low"]
+                                logger.info(f"{ticker} Low: {low_price} (type: {type(low_price)})")
+                                if hasattr(low_price, "iloc"):
+                                    low_price = low_price.iloc[0]
+                                    
+                                volume = latest["Volume"] if "Volume" in latest else None
+                                logger.info(f"{ticker} Volume: {volume} (type: {type(volume) if volume is not None else 'None'})")
+                                if hasattr(volume, "iloc"):
+                                    volume = volume.iloc[0]
+                                
+                                result_dict = {
                                     "price": float(close_price),
-                                    "timestamp": datetime.now(),
-                                    "volume": int(latest["Volume"]) if "Volume" in latest else None,
+                                    "day_open": float(open_price),     
+                                    "day_high": float(high_price),      
+                                    "day_low": float(low_price),        
+                                    "close_price": float(close_price),
+                                    "volume": int(volume) if volume is not None else None,
+                                    "price_timestamp": price_date,
+                                    "price_timestamp_str": price_date.strftime("%Y-%m-%d %H:%M:%S"),
                                     "source": self.source_name
                                 }
+                                
+                                logger.info(f"Result dictionary for {ticker}: {result_dict}")
+                                results[ticker] = result_dict
+                            else:
+                                logger.error(f"No Close column found for {ticker}")
                 
                 # Add a short delay to avoid rate limiting
                 await asyncio.sleep(0.5)
                 
             except Exception as e:
                 logger.error(f"Error in batch lookup for {len(batch)} tickers: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+                
+                logger.info(f"Data structure: {type(data) if 'data' in locals() else 'No data'}")
+                if 'data' in locals() and hasattr(data, 'shape'):
+                    logger.info(f"Data shape: {data.shape}")
+                if 'data' in locals() and hasattr(data, 'columns'):
+                    logger.info(f"Data columns: {list(data.columns)}")
                 
                 # If batch lookup fails, try individual lookups
                 for ticker in batch:
                     try:
+                        logger.info(f"Attempting individual lookup for {ticker}")
                         price_data = await self.get_current_price(ticker)
                         if price_data:
+                            logger.info(f"Individual lookup successful for {ticker}: {price_data}")
                             results[ticker] = price_data
+                        else:
+                            logger.warning(f"Individual lookup returned no data for {ticker}")
                     except Exception as individual_error:
                         logger.error(f"Error getting data for {ticker}: {str(individual_error)}")
+                        logger.error(traceback.format_exc())
                     
                     # Add a short delay between individual requests
                     await asyncio.sleep(0.2)
         
+        logger.info(f"Batch request complete, returning data for {len(results)} tickers")
         return results
     
     async def get_company_metrics(self, ticker: str) -> Optional[Dict[str, Any]]:
@@ -213,7 +371,13 @@ class YahooFinanceClient(MarketDataSource):
                 # Additional metrics
                 "beta": info.get("beta"),
                 "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
-                "fifty_two_week_high": info.get("fiftyTwoWeekHigh")
+                "fifty_two_week_high": info.get("fiftyTwoWeekHigh"),
+                "eps": info.get("trailingEPS"),
+                "forward_eps": info.get("forwardEPS"),
+                "fifty_two_week_range": info.get("fiftyTwoWeekRange"),
+                "target_median_price": info.get("targetMedianPrice"),
+                "bid_price": info.get("bid"),
+                "ask_price": info.get("ask"),
             }
             
             # Remove None values to prevent database insertion issues

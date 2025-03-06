@@ -960,7 +960,11 @@ async def get_security_history(ticker: str, current_user: dict = Depends(get_cur
         SELECT 
             ticker, 
             date,
-            close_price
+            close_price,
+            day_open,
+            day_high,
+            day_low,
+            volume
         FROM price_history
         WHERE ticker = :ticker
         ORDER BY date ASC
@@ -976,7 +980,11 @@ async def get_security_history(ticker: str, current_user: dict = Depends(get_cur
             formatted_history.append({
                 "ticker": row["ticker"],
                 "date": row["date"].isoformat() if row["date"] else None,
-                "close_price": float(row["close_price"]) if row["close_price"] is not None else None
+                "close_price": float(row["close_price"]) if row["close_price"] is not None else None,
+                "open_price": float(row["day_open"]) if row["day_open"] is not None else None,
+                "high_price": float(row["day_high"]) if row["day_high"] is not None else None,
+                "low_price": float(row["day_low"]) if row["day_low"] is not None else None,
+                "volume": int(row["volume"]) if row["volume"] is not None else None
             })
         
         return {"history": formatted_history}

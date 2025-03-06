@@ -276,11 +276,14 @@ class DataConsistencyMonitor:
             id, 
             ticker, 
             date, 
-            close_price 
+            close_price,
+            day_open,
+            day_high,
+            day_low 
         FROM 
             price_history 
         WHERE 
-            close_price <= 0
+            close_price <= 0 OR day_open <= 0 OR day_high <= 0 OR day_low <= 0
         LIMIT 100
         """
         invalid_prices = await self.database.fetch_all(query)

@@ -264,44 +264,59 @@ class PriceUpdaterV2:
                                 continue
                                 
                             # Update the security record - don't set on_yfinance=FALSE on timeout
+                            # Find this section of code in update_security_prices
                             await self.database.execute(
                                 """
                                 UPDATE securities 
                                 SET 
                                     current_price = :price, 
                                     last_updated = :timestamp,
-                                    price_timestamp = :price_timestamp_str,
-                                    data_source = :source,
-                                    on_yfinance = CASE 
-                                        WHEN :explicitly_not_found = TRUE THEN FALSE
-                                        ELSE on_yfinance
-                                    END
+                                    price_timestamp = :price_timestamp,
+                                    day_open = :day_open,
+                                    day_high = :day_high,
+                                    day_low = :day_low,
+                                    volume = :volume,
+                                    data_source = :source
                                 WHERE ticker = :ticker
                                 """,
                                 {
                                     "ticker": ticker,
                                     "price": data["price"],
                                     "timestamp": datetime.utcnow(),
-                                    "price_timestamp_str": data.get("price_timestamp_str"),
-                                    "source": "yahoo_finance",
-                                    "explicitly_not_found": data.get("not_found", False)
+                                    "price_timestamp": data.get("price_timestamp"),
+                                    "day_open": data.get("day_open"),  
+                                    "day_high": data.get("day_high"),  
+                                    "day_low": data.get("day_low"),    
+                                    "volume": data.get("volume"),
+                                    "source": "yahoo_finance"
                                 }
                             )
-                            
-                            # Add to price history
+
                             await self.database.execute(
                                 """
                                 INSERT INTO price_history 
-                                (ticker, close_price, timestamp, date, source)
-                                VALUES (:ticker, :price, :timestamp, :date, :source)
+                                (ticker, close_price, day_open, day_high, day_low, volume, timestamp, date, price_timestamp, source)
+                                VALUES (:ticker, :price, :day_open, :day_high, :day_low, :volume, :timestamp, :date, :price_timestamp, :source)
                                 ON CONFLICT (ticker, date) DO UPDATE
-                                SET close_price = :price, timestamp = :timestamp, source = :source
+                                SET close_price = :price, 
+                                    day_open = :day_open,
+                                    day_high = :day_high,
+                                    day_low = :day_low,
+                                    volume = :volume,
+                                    timestamp = :timestamp, 
+                                    price_timestamp = :price_timestamp,
+                                    source = :source
                                 """,
                                 {
                                     "ticker": ticker,
                                     "price": data["price"],
+                                    "day_open": data.get("day_open"),  
+                                    "day_high": data.get("day_high"),  
+                                    "day_low": data.get("day_low"),    
+                                    "volume": data.get("volume"),
                                     "timestamp": datetime.utcnow(),
                                     "date": datetime.utcnow().date(),
+                                    "price_timestamp": data.get("price_timestamp"),
                                     "source": "yahoo_finance"
                                 }
                             )
@@ -479,7 +494,13 @@ class PriceUpdaterV2:
                         "fifty_two_week_high": metrics.get("fifty_two_week_high"),
                         "market_cap": metrics.get("market_cap"),
                         "timestamp": datetime.now(timezone.utc),
-                        "source": metrics.get("source", "unknown")
+                        "source": metrics.get("source", "unknown"),
+                        "eps": metrics.get("eps"),
+                        "forward_eps": metrics.get("forward_eps"),
+                        "fifty_two_week_range": metrics.get("fifty_two_week_range"),
+                        "target_median_price": metrics.get("target_median_price"),
+                        "bid_price": metrics.get("bid_price"),
+                        "ask_price": metrics.get("ask_price")
                     }
                     
                     # Type-safe column mapping with conversion
@@ -500,8 +521,23 @@ class PriceUpdaterV2:
                         "target_mean_price": ("target_mean_price", float),
                         "beta": ("beta", float),
                         "fifty_two_week_low": ("fifty_two_week_low", float),
-                        "fifty_two_week_high": ("fifty_two_week_high", float)
+                        "fifty_two_week_high": ("fifty_two_week_high", float),
+                        "eps": ("eps", float),
+                        "forward_eps": ("forward_eps", float),
+                        "bid_price": ("bid_price", float),
+                        "ask_price": ("ask_price", float),
+                        "target_median_price": ("target_median_price", float),
+                        "fifty_two_week_range": ("fifty_two_week_range", str)
                     }
+                    
+                    for key in ['market_cap', 'target_mean_price']:
+                        if key in update_data and update_data[key] is not None:
+                            try:
+                                update_data[key] = float(update_data[key])
+                            except (ValueError, TypeError):
+                                logger.warning(f"Could not convert {key} for {ticker}")
+                                # Set to None if conversion fails
+                                update_data[key] = None
                     
                     # Add columns to update with type conversion
                     for metric_key, (db_column, conversion_func) in column_mapping.items():
@@ -510,34 +546,46 @@ class PriceUpdaterV2:
                                 update_data[db_column] = conversion_func(metrics[metric_key])
                             except (ValueError, TypeError):
                                 logger.warning(f"Could not convert {metric_key} for {ticker}")
+                                
+                    # Add this right before executing the database query
+                    if "timestamp" in update_data and update_data["timestamp"] is not None:
+                        if update_data["timestamp"].tzinfo is not None:
+                            # Remove timezone info for PostgreSQL
+                            update_data["timestamp"] = update_data["timestamp"].replace(tzinfo=None)
                     
                     # Construct dynamic SQL query
                     query = """
                     UPDATE securities 
                     SET 
-                        company_name = :company_name,
-                        sector = :sector,
-                        industry = :industry,
-                        market_cap = :market_cap,
-                        current_price = :current_price,
-                        previous_close = :previous_close,
-                        day_open = :day_open,
-                        day_low = :day_low,
-                        day_high = :day_high,
-                        volume = :volume,
-                        average_volume = :average_volume,
-                        pe_ratio = :pe_ratio,
-                        forward_pe = :forward_pe,
-                        dividend_rate = :dividend_rate,
-                        dividend_yield = :dividend_yield,
-                        target_high_price = :target_high_price,
-                        target_low_price = :target_low_price,
+                        company_name = CAST(:company_name AS VARCHAR),
+                        sector = CAST(:sector AS VARCHAR),
+                        industry = CAST(:industry AS VARCHAR),
+                        market_cap = CAST(:market_cap AS NUMERIC),
+                        current_price = CAST(:current_price AS NUMERIC),
+                        previous_close = CAST(:previous_close AS NUMERIC),
+                        day_open = CAST(:day_open AS NUMERIC),
+                        day_low = CAST(:day_low AS NUMERIC),
+                        day_high = CAST(:day_high AS NUMERIC),
+                        volume = CAST(:volume AS BIGINT),
+                        average_volume = CAST(:average_volume AS BIGINT),
+                        pe_ratio = CAST(:pe_ratio AS NUMERIC),
+                        forward_pe = CAST(:forward_pe AS NUMERIC),
+                        dividend_rate = CAST(:dividend_rate AS NUMERIC),
+                        dividend_yield = CAST(:dividend_yield AS NUMERIC),
+                        target_high_price = CAST(:target_high_price AS NUMERIC),
+                        target_low_price = CAST(:target_low_price AS NUMERIC),
                         target_mean_price = CAST(:target_mean_price AS NUMERIC),
-                        beta = :beta,
-                        fifty_two_week_low = :fifty_two_week_low,
-                        fifty_two_week_high = :fifty_two_week_high,
-                        last_metrics_update = :timestamp,
-                        metrics_source = :source,
+                        target_median_price = CAST(:target_median_price AS NUMERIC),
+                        beta = CAST(:beta AS NUMERIC),
+                        fifty_two_week_low = CAST(:fifty_two_week_low AS NUMERIC),
+                        fifty_two_week_high = CAST(:fifty_two_week_high AS NUMERIC),
+                        fifty_two_week_range = CAST(:fifty_two_week_range AS TEXT),
+                        eps = CAST(:eps AS NUMERIC),
+                        forward_eps = CAST(:forward_eps AS NUMERIC),
+                        bid_price = CAST(:bid_price AS NUMERIC),
+                        ask_price = CAST(:ask_price AS NUMERIC),
+                        last_metrics_update = CAST(:timestamp AS TIMESTAMP),
+                        metrics_source = CAST(:source AS VARCHAR),
                         on_yfinance = CASE WHEN :source = 'yahoo_finance' THEN TRUE ELSE on_yfinance END
                     WHERE ticker = :ticker
                     """
@@ -554,7 +602,7 @@ class PriceUpdaterV2:
                         "sector": update_data.get("sector"),
                         "current_price": update_data.get("current_price"),
                         "source": update_data.get("source"),
-                        "timestamp": datetime.now(timezone.utc).isoformat()
+                        "timestamp": datetime.now().replace(tzinfo=None),
                     }
                     
                     updated_tickers.add(ticker)
@@ -567,11 +615,24 @@ class PriceUpdaterV2:
             
             # Remaining method code stays the same...
             
+            result = {
+                "total_tickers": len(selected_tickers),
+                "updated_count": update_count,
+                "unavailable_count": unavailable_count,
+                "updated_tickers": list(updated_tickers),
+                "duration_seconds": (datetime.now(timezone.utc) - start_time).total_seconds()
+            }
+            
+            return result
+            
         except Exception as e:
+            # Handle method-level error
             logger.error(f"Comprehensive error updating metrics: {str(e)}")
             raise
         finally:
-            await self.disconnect()            
+            # Cleanup code
+            await self.disconnect()
+            
     async def update_historical_prices(self, tickers=None, max_tickers=None, days=30) -> Dict[str, Any]:
             """
             Update historical prices for securities
@@ -660,17 +721,18 @@ class PriceUpdaterV2:
                         for point in historical_data:
                             try:
                                 # Insert or update price history record
+                                # Fix in the update_historical_prices method
                                 await self.database.execute(
                                     """
                                     INSERT INTO price_history 
-                                    (ticker, close_price, open_price, high_price, low_price, volume, timestamp, date, source)
-                                    VALUES (:ticker, :close, :open, :high, :low, :volume, :timestamp, :date, :source)
+                                    (ticker, close_price, day_open, day_high, day_low, volume, timestamp, date, source)
+                                    VALUES (:ticker, :close, :day_open, :day_high, :day_low, :volume, :timestamp, :date, :source)
                                     ON CONFLICT (ticker, date) DO UPDATE
                                     SET 
                                         close_price = :close,
-                                        open_price = :open,
-                                        high_price = :high,
-                                        low_price = :low,
+                                        day_open = :day_open,
+                                        day_high = :day_high,
+                                        day_low = :day_low,
                                         volume = :volume,
                                         timestamp = :timestamp,
                                         source = :source
@@ -678,9 +740,9 @@ class PriceUpdaterV2:
                                     {
                                         "ticker": ticker,
                                         "close": point.get("close"),
-                                        "open": point.get("open"),
-                                        "high": point.get("high"),
-                                        "low": point.get("low"),
+                                        "day_open": point.get("open"),
+                                        "day_high": point.get("high"),
+                                        "day_low": point.get("low"),
                                         "volume": point.get("volume"),
                                         "timestamp": point.get("timestamp") or datetime.utcnow(),
                                         "date": point.get("date"),
