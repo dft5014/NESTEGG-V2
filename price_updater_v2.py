@@ -458,6 +458,7 @@ class PriceUpdaterV2:
             # Track statistics
             update_count = 0
             unavailable_count = 0
+            not_found_tickers = []  # Track tickers not found on any source
             sources_used = set()
             metrics_updates = {}
             updated_tickers = set()
@@ -468,9 +469,24 @@ class PriceUpdaterV2:
                     # Get company metrics
                     metrics = await self.market_data.get_company_metrics(ticker)
                     
-                    if not metrics:
+                    # Check if metrics are completely unavailable
+                    if not metrics or metrics.get("not_found"):
                         logger.warning(f"No metrics available for {ticker}")
                         unavailable_count += 1
+                        not_found_tickers.append(ticker)
+                        
+                        # Mark the ticker as unavailable on YFinance
+                        await self.database.execute(
+                            """
+                            UPDATE securities 
+                            SET 
+                                on_yfinance = FALSE,
+                                last_metrics_update = NOW()
+                            WHERE ticker = :ticker
+                            """,
+                            {"ticker": ticker}
+                        )
+                        
                         continue
                     
                     # Prepare update dictionary with type conversion and safe casting
@@ -612,13 +628,14 @@ class PriceUpdaterV2:
                     logger.error(f"Error updating metrics for {ticker}: {str(e)}")
                     logger.error(f"Problematic metrics: {metrics}")
                     unavailable_count += 1
+                    not_found_tickers.append(ticker)
             
-            # Remaining method code stays the same...
-            
+            # Create comprehensive result
             result = {
                 "total_tickers": len(selected_tickers),
                 "updated_count": update_count,
                 "unavailable_count": unavailable_count,
+                "not_found_tickers": not_found_tickers,
                 "updated_tickers": list(updated_tickers),
                 "duration_seconds": (datetime.now(timezone.utc) - start_time).total_seconds()
             }
@@ -626,11 +643,9 @@ class PriceUpdaterV2:
             return result
             
         except Exception as e:
-            # Handle method-level error
             logger.error(f"Comprehensive error updating metrics: {str(e)}")
             raise
         finally:
-            # Cleanup code
             await self.disconnect()
             
     async def update_historical_prices(self, tickers=None, max_tickers=None, days=30, batch_size=5) -> Dict[str, Any]:
@@ -1068,6 +1083,130 @@ class PriceUpdaterV2:
                 raise
             finally:
                 await self.disconnect()
+                
+    async def update_stale_securities(self, metrics_days_threshold=7, price_days_threshold=1, max_metrics_tickers=50, max_prices_tickers=100) -> Dict[str, Any]:
+        """
+        Update securities prioritized by staleness of metrics and prices
+        """
+        try:
+            await self.connect()
+            
+            # Use a timezone-naive datetime for consistency
+            start_time = datetime.now()
+            
+            # Record the start of this operation
+            event_id = await record_system_event(
+                self.database, 
+                "stale_update", 
+                "started", 
+                {
+                    "metrics_days_threshold": metrics_days_threshold,
+                    "price_days_threshold": price_days_threshold,
+                    "max_metrics_tickers": max_metrics_tickers, 
+                    "max_prices_tickers": max_prices_tickers
+                }
+            )
+            
+            results = {}
+            
+            # Find tickers with stale metrics (older than metrics_days_threshold days)
+            metrics_query = """
+            SELECT ticker
+            FROM securities
+            WHERE active = true
+            AND (
+                last_metrics_update IS NULL 
+                OR last_metrics_update < NOW() - INTERVAL '1 days' * :days
+            )
+            ORDER BY COALESCE(last_metrics_update, '1970-01-01') ASC
+            LIMIT :limit
+            """
+            
+            metrics_tickers = await self.database.fetch_all(
+                metrics_query, 
+                {"days": metrics_days_threshold, "limit": max_metrics_tickers}
+            )
+            
+            # Find tickers with stale prices (older than price_days_threshold days)
+            price_query = """
+            SELECT ticker
+            FROM securities
+            WHERE active = true
+            AND (
+                last_updated IS NULL 
+                OR last_updated < NOW() - INTERVAL '1 days' * :days
+            )
+            ORDER BY COALESCE(last_updated, '1970-01-01') ASC
+            LIMIT :limit
+            """
+            
+            price_tickers = await self.database.fetch_all(
+                price_query, 
+                {"days": price_days_threshold, "limit": max_prices_tickers}
+            )
+            
+            # Update stale metrics
+            if metrics_tickers:
+                metrics_tickers_list = [row["ticker"] for row in metrics_tickers]
+                logger.info(f"Stale update: Updating metrics for {len(metrics_tickers_list)} securities (not updated in {metrics_days_threshold} days)")
+                results["metrics"] = await self.update_company_metrics(
+                    tickers=metrics_tickers_list
+                )
+            else:
+                logger.info(f"No stale metrics found (older than {metrics_days_threshold} days)")
+                results["metrics"] = {"updated_count": 0, "message": "No stale metrics found"}
+            
+            # Update stale prices
+            if price_tickers:
+                price_tickers_list = [row["ticker"] for row in price_tickers]
+                logger.info(f"Stale update: Updating prices for {len(price_tickers_list)} securities (not updated in {price_days_threshold} days)")
+                results["prices"] = await self.update_security_prices(
+                    tickers=price_tickers_list
+                )
+            else:
+                logger.info(f"No stale prices found (older than {price_days_threshold} days)")
+                results["prices"] = {"updated_count": 0, "message": "No stale prices found"}
+            
+            # Calculate duration
+            duration = (datetime.now() - start_time).total_seconds()
+            
+            # Create summary result
+            summary = {
+                "metrics_days_threshold": metrics_days_threshold,
+                "price_days_threshold": price_days_threshold,
+                "duration_seconds": duration,
+                "metrics_count": len(metrics_tickers) if metrics_tickers else 0,
+                "prices_count": len(price_tickers) if price_tickers else 0,
+                "results": results
+            }
+            
+            # Record completion
+            await update_system_event(
+                self.database,
+                event_id,
+                "completed",
+                summary
+            )
+            
+            return summary
+            
+        except Exception as e:
+            logger.error(f"Error in stale update: {str(e)}")
+            
+            # Record failure
+            if 'event_id' in locals() and event_id:
+                await update_system_event(
+                    self.database,
+                    event_id,
+                    "failed",
+                    {"error": str(e)},
+                    str(e)
+                )
+            
+            raise
+        finally:
+            await self.disconnect()
+            
 
 # Standalone execution function
 async def run_price_update(update_type: str = "prices", max_tickers: int = None, tickers_list: List[str] = None, days: int = 30):
@@ -1082,27 +1221,38 @@ async def run_price_update(update_type: str = "prices", max_tickers: int = None,
             result = await updater.update_company_metrics(tickers=tickers_list, max_tickers=max_tickers)
             print(f"Metrics update complete: {result}")
         elif update_type == "history":
-            # Pass the days parameter to update_historical_prices
             result = await updater.update_historical_prices(tickers=tickers_list, max_tickers=max_tickers, days=days)
             print(f"Historical price update complete: {result}")
         elif update_type == "smart":
-            # Smart update that prioritizes what needs updating most
             result = await updater.smart_update(update_type="all", max_tickers=max_tickers)
             print(f"Smart update complete: {result}")
+        elif update_type == "stale":  # Add this case
+            metrics_days = 7  # Default value
+            price_days = 1    # Default value
+            result = await updater.update_stale_securities(
+                metrics_days_threshold=metrics_days,
+                price_days_threshold=price_days,
+                max_metrics_tickers=max_tickers or 50,
+                max_prices_tickers=max_tickers or 100
+            )
+            print(f"Stale update complete: {result}")
         else:
             print(f"Unknown update type: {update_type}")
             
     except Exception as e:
         print(f"Update failed: {str(e)}")
 
+# Update argument parser
 if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="NestEgg Market Data Updater")
-    parser.add_argument("--type", choices=["prices", "metrics", "history", "smart"], default="smart", help="Type of update to perform")
+    parser.add_argument("--type", choices=["prices", "metrics", "history", "smart", "stale"], default="smart", help="Type of update to perform")
     parser.add_argument("--max", type=int, help="Maximum number of tickers to process")
     parser.add_argument("--tickers", type=str, help="Comma-separated list of tickers to update")
     parser.add_argument("--days", type=int, default=30, help="Number of days of history to fetch (for history updates)")
+    parser.add_argument("--metrics-days", type=int, default=7, help="Days threshold for stale metrics")
+    parser.add_argument("--price-days", type=int, default=1, help="Days threshold for stale prices")
     parser.add_argument("--batch-size", type=int, default=5, help="Batch size for API calls (for batched operations)")
     
     args = parser.parse_args()
@@ -1115,5 +1265,14 @@ if __name__ == "__main__":
     # Pass the days parameter when calling run_price_update
     if args.type == "history":
         asyncio.run(run_price_update(args.type, args.max, tickers_list, days=args.days))
+    elif args.type == "stale":
+        # Special case for stale updates
+        updater = PriceUpdaterV2()
+        asyncio.run(updater.update_stale_securities(
+            metrics_days_threshold=args.metrics_days,
+            price_days_threshold=args.price_days,
+            max_metrics_tickers=args.max or 50,
+            max_prices_tickers=args.max or 100
+        ))
     else:
         asyncio.run(run_price_update(args.type, args.max, tickers_list))

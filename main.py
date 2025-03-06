@@ -729,7 +729,7 @@ async def get_securities(current_user: dict = Depends(get_current_user)):
                 ) as price,
                 market_cap,
                 pe_ratio,
-                avg_volume,
+                volume,  # Replace avg_volume with volume
                 dividend_yield,
                 dividend_rate,
                 eps,
@@ -1286,6 +1286,31 @@ async def trigger_update_and_calculate(current_user: dict = Depends(get_current_
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
             detail=f"Failed to update and calculate: {str(e)}"
+        )
+
+@app.post("/market/update-stale")
+async def trigger_stale_update(
+    metrics_days: int = 7, 
+    price_days: int = 1, 
+    max_metrics: int = 50, 
+    max_prices: int = 100,
+    current_user: dict = Depends(get_current_user)
+):
+    """Update securities based on staleness of data"""
+    try:
+        updater = PriceUpdaterV2()
+        result = await updater.update_stale_securities(
+            metrics_days_threshold=metrics_days,
+            price_days_threshold=price_days,
+            max_metrics_tickers=max_metrics,
+            max_prices_tickers=max_prices
+        )
+        return {"message": "Stale data update completed successfully", "details": result}
+    except Exception as e:
+        logger.error(f"Failed to update stale data: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail=f"Failed to update stale data: {str(e)}"
         )
 
 # Get system events endpoint
