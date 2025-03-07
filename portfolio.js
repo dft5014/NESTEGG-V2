@@ -43,6 +43,10 @@ export default function Portfolio() {
   const [selectedPositionDetail, setSelectedPositionDetail] = useState(null);
   const [isPositionDetailModalOpen, setIsPositionDetailModalOpen] = useState(false);
   const [formMessage, setFormMessage] = useState("");
+  const [testQuery, setTestQuery] = useState('');
+  const [testResults, setTestResults] = useState([]);
+  const [testLoading, setTestLoading] = useState(false);
+  const [testError, setTestError] = useState(null);
   const [securitySearch, setSecuritySearch] = useState("");
   const [accountCategory, setAccountCategory] = useState("");
   const [searchResults, setSearchResults] = useState([]);
@@ -149,6 +153,9 @@ const calculateAccountCostBasis = (accountId) => {
     return total + (positionCostBasis * position.shares);
   }, 0);
 };
+
+
+
 
 // Fetch portfolio summary
 const fetchPortfolioSummary = async () => {
@@ -594,29 +601,112 @@ const fetchPositions = async (accountId) => {
   }
 };
 
-  // Search for securities
-  const searchSecurities = async (query) => {
-    if (!query || query.length < 2) return [];
+// Add this function with your other function declarations
+const handleTestSearch = async () => {
+  if (!testQuery) return;
+  
+  setTestLoading(true);
+  setTestError(null);
+  
+  try {
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setTestError("Authentication required");
+      setTestLoading(false);
+      return;
+    }
     
-    try {
-      const token = localStorage.getItem("token");
-      const response = await fetch(`${apiBaseUrl}/securities/search?query=${encodeURIComponent(query)}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      
-      if (!response.ok) {
-        throw new Error("Failed to search securities");
+    console.log(`Running test search for: "${testQuery}"`);
+    
+    const response = await fetch(`${apiBaseUrl}/securities/search?query=${encodeURIComponent(testQuery)}`, {
+      headers: { 
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json"
       }
-      
-      const data = await response.json();
-      return data.results || [];
-    } catch (error) {
-      console.error("Error searching securities:", error);
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Search failed: ${response.status} - ${errorText}`);
+    }
+    
+    const data = await response.json();
+    console.log("DIRECT API RESULTS:", data);
+    setTestResults(data.results || []);
+  } catch (err) {
+    console.error("Test search error:", err);
+    setTestError(err.message);
+  } finally {
+    setTestLoading(false);
+  }
+};
+
+// Enhanced searchSecurities function
+const searchSecurities = async (query) => {
+  if (!query || query.length < 1) {
+    setSearchResults([]);
+    return [];
+  }
+  
+  try {
+    const token = localStorage.getItem("token");
+    if (!token) {
+      console.error("Authentication token missing");
       return [];
     }
-  };
+    
+    console.log(`Searching securities with query: "${query}"`);
+    
+    // Add debugging request information
+    const requestUrl = `${apiBaseUrl}/securities/search?query=${encodeURIComponent(query)}`;
+    console.log(`Request URL: ${requestUrl}`);
+    
+    const response = await fetch(requestUrl, {
+      headers: { 
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json"
+      }
+    });
+    
+    // Enhanced error handling
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`Securities search error: ${response.status} - ${errorText}`);
+      throw new Error(`Failed to search securities: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    console.log("Search results:", data);
+    
+    // Check for undefined or missing results
+    if (!data || !data.results) {
+      console.warn("API response is missing expected 'results' property:", data);
+      return [];
+    }
+    
+    // Transform results to ensure consistent format
+    const formattedResults = data.results.map(result => ({
+      ticker: result.ticker || '',
+      name: result.name || result.company_name || "Unknown",
+      price: typeof result.price === 'number' ? result.price : 0,
+      sector: result.sector || '',
+      industry: result.industry || '',
+      market_cap: result.market_cap || 0
+    }));
+    
+    console.log("Formatted results:", formattedResults);
+    
+    // Update state with search results
+    setSearchResults(formattedResults);
+    return formattedResults;
+  } catch (error) {
+    console.error("Error searching securities:", error);
+    setSearchResults([]);
+    return [];
+  }
+};
 
-  const handleInstitutionInput = (value) => {
+const handleInstitutionInput = (value) => {
     setInstitution(value);
     
     if (value.trim().length > 0) {
@@ -689,47 +779,100 @@ const handleAddAccount = async (e) => {
   }
 };
 
-  // Handle editing an existing account
-  const handleEditAccount = async (e) => {
-    e.preventDefault();
+// Handle editing an existing account
+const handleEditAccount = async (e) => {
+  e.preventDefault();
+  const token = localStorage.getItem("token");
+
+  if (!editAccount.account_name.trim()) {
+    setFormMessage("Account name is required");
+    return;
+  }
+
+  try {
+    const response = await fetch(`${apiBaseUrl}/accounts/${editAccount.id}`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        account_name: editAccount.account_name,
+        institution: editAccount.institution || "",
+        type: editAccount.type || ""
+      }),
+    });
+
+    if (response.ok) {
+      setFormMessage("Account updated successfully!");
+      setTimeout(() => {
+        setIsEditAccountModalOpen(false);
+        setFormMessage("");
+        fetchAccounts();
+        setEditAccount(null);
+      }, 1000);
+    } else {
+      const errorText = await response.text();
+      setFormMessage(`Failed to update account: ${errorText}`);
+    }
+  } catch (error) {
+    console.error("🔥 Error updating account:", error);
+    setFormMessage("Error updating account");
+  }
+};
+
+// diagnostic 
+const runSecuritiesTest = async () => {
+  console.group("Securities Search Diagnostic");
+  
+  try {
+    // Test basic endpoint access
     const token = localStorage.getItem("token");
-
-    if (!editAccount.account_name.trim()) {
-      setFormMessage("Account name is required");
-      return;
-    }
-
-    try {
-      const response = await fetch(`${apiBaseUrl}/accounts/${editAccount.id}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          account_name: editAccount.account_name,
-          institution: editAccount.institution || "",
-          type: editAccount.type || ""
-        }),
-      });
-
-      if (response.ok) {
-        setFormMessage("Account updated successfully!");
-        setTimeout(() => {
-          setIsEditAccountModalOpen(false);
-          setFormMessage("");
-          fetchAccounts();
-          setEditAccount(null);
-        }, 1000);
-      } else {
-        const errorText = await response.text();
-        setFormMessage(`Failed to update account: ${errorText}`);
+    console.log("Token available:", !!token);
+    
+    // First test regular securities endpoint
+    console.log("Testing main securities endpoint...");
+    const secResponse = await fetch(`${apiBaseUrl}/securities`, {
+      headers: { 
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json"
       }
-    } catch (error) {
-      console.error("🔥 Error updating account:", error);
-      setFormMessage("Error updating account");
+    });
+    
+    console.log("Main endpoint status:", secResponse.status);
+    const secData = await secResponse.json();
+    console.log("Securities count:", secData.securities ? secData.securities.length : 0);
+    
+    // Now test search with common tickers
+    const testQueries = ["apple", "nke", "ms", "a", "goog"];
+    
+    for (const query of testQueries) {
+      console.log(`Testing search for "${query}"...`);
+      const searchUrl = `${apiBaseUrl}/securities/search?query=${encodeURIComponent(query)}`;
+      console.log("Request URL:", searchUrl);
+      
+      const searchResponse = await fetch(searchUrl, {
+        headers: { 
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
+      });
+      
+      console.log(`Search status for "${query}":`, searchResponse.status);
+      const searchData = await searchResponse.json();
+      console.log(`Results for "${query}":`, searchData.results ? searchData.results.length : 0);
+      
+      if (searchData.results && searchData.results.length > 0) {
+        console.log("First result:", searchData.results[0]);
+      }
     }
-  };
+    
+  } catch (error) {
+    console.error("Diagnostic error:", error);
+  }
+  
+  console.groupEnd();
+};
 
   // Handle deleting an account
   const handleDeleteAccount = async (accountId) => {
@@ -784,47 +927,73 @@ const handleAddPosition = (type) => {
     // Add logic for other types in the future
   }
 };
+
+// Add this function to help with debugging
+const debugSearchProcess = async (query) => {
+  console.group(`Securities Search Debug: "${query}"`);
+  
+  try {
+    const token = localStorage.getItem("token");
+    console.log("Token available:", !!token);
+    
+    console.log("Requesting:", `${apiBaseUrl}/securities/search?query=${encodeURIComponent(query)}`);
+    
+    const response = await fetch(`${apiBaseUrl}/securities/search?query=${encodeURIComponent(query)}`, {
+      headers: { 
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json"
+      }
+    });
+    
+    console.log("Response status:", response.status);
+    console.log("Response headers:", Object.fromEntries([...response.headers]));
+    
+    const text = await response.text();
+    console.log("Raw response:", text);
+    
+    try {
+      const data = JSON.parse(text);
+      console.log("Parsed JSON:", data);
+      console.log("Results array:", data.results);
+      console.log("Results count:", data.results ? data.results.length : 0);
+    } catch (e) {
+      console.error("Failed to parse response as JSON:", e);
+    }
+  } catch (error) {
+    console.error("Fetch error:", error);
+  }
+  
+  console.groupEnd();
+};
+
+
   // Handle security search and get placeholder price
   const handleSecuritySearch = async (value) => {
     setSecuritySearch(value);
     
     if (value.length >= 2) {
+      if (value === "DEBUG") {
+        await debugSearchProcess("APP"); // Test with a common prefix
+        return;
+      }    
       try {
-        const token = localStorage.getItem("token");
-        const response = await fetch(`${apiBaseUrl}/securities/search?query=${encodeURIComponent(value)}`, {
-          headers: { 
-            "Authorization": `Bearer ${token}`,
-            "Content-Type": "application/json"
-          }
-        });
-  
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`Failed to search securities: ${errorText}`);
-        }
-  
-        const data = await response.json();
-        const results = data.results || [];
-  
-        setSearchResults(results);
-  
+        const results = await searchSecurities(value);
+      
         // If we got a result, use the first one's price
         if (results.length > 0) {
           setSecurityPrice(results[0].price || 0);
         }
       } catch (error) {
-        console.error("Error searching securities:", error);
-        setSearchResults([]);
-        // Optional: set an error message for the user
+        console.error("Error in security search:", error);
         setFormMessage(`Security search error: ${error.message}`);
       }
     } else {
       setSearchResults([]);
     }
   };
-
+    
   // Handle submitting a new security position
-const handleAddSecurity = async () => {
+  const handleAddSecurity = async () => {
     if (!securitySearch || securityShares <= 0 || !selectedAccount || !purchaseDate || !costPerShare) {
       setFormMessage("All fields are required");
       return;
@@ -837,6 +1006,40 @@ const handleAddSecurity = async () => {
       // Add loading state
       setFormMessage("Adding position...");
       
+      // Verify the ticker and get latest price before submission
+      const verifyResponse = await fetch(`${apiBaseUrl}/securities/search?query=${encodeURIComponent(securitySearch)}`, {
+        headers: { 
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
+      });
+      
+      if (!verifyResponse.ok) {
+        throw new Error("Failed to verify security");
+      }
+      
+      const verifyData = await verifyResponse.json();
+      console.log("Verification data:", verifyData);
+      
+      if (!verifyData.results || verifyData.results.length === 0) {
+        throw new Error("Security not found in database");
+      }
+      
+      // Find exact match or close match from results
+      const exactMatch = verifyData.results.find(
+        result => result.ticker.toUpperCase() === securitySearch.toUpperCase()
+      );
+      
+      let securityToUse;
+      if (exactMatch) {
+        securityToUse = exactMatch;
+        console.log("Using exact match:", exactMatch);
+      } else {
+        // Use first result if no exact match
+        securityToUse = verifyData.results[0];
+        console.log("Using first result:", securityToUse);
+      }
+      
       const response = await fetch(`${apiBaseUrl}/positions/${selectedAccount}`, {
         method: "POST",
         headers: {
@@ -844,7 +1047,7 @@ const handleAddSecurity = async () => {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          ticker: securitySearch.toUpperCase(),
+          ticker: securityToUse.ticker.toUpperCase(),
           shares: parseFloat(securityShares),
           cost_basis: parseFloat(costPerShare),
           purchase_date: purchaseDate
@@ -1223,6 +1426,8 @@ const handleBulkUpload = async () => {
     },
   };
 
+
+// INTERFACE START  
   return (
     <div className="portfolio-container">
       <header className="portfolio-header">
@@ -1259,6 +1464,48 @@ const handleBulkUpload = async () => {
     className="mb-6"
   />
 )}
+
+{/* TEST SEARCH FUNCTIONALITY */}
+<div className="mt-8 p-4 border border-blue-300 rounded bg-blue-50">
+  <h3 className="text-lg font-bold mb-2">Test Securities Search</h3>
+  <div className="flex gap-2 mb-4">
+    <input
+      type="text"
+      value={testQuery}
+      onChange={(e) => setTestQuery(e.target.value)}
+      className="px-3 py-2 border rounded flex-grow"
+      placeholder="Enter ticker or company name"
+    />
+    <button
+      onClick={handleTestSearch}
+      className="px-4 py-2 bg-blue-600 text-white rounded"
+      disabled={testLoading}
+    >
+      {testLoading ? "Searching..." : "Search"}
+    </button>
+  </div>
+  
+  {testError && (
+    <div className="p-3 mb-4 bg-red-100 text-red-700 rounded">{testError}</div>
+  )}
+  
+  {testResults.length > 0 ? (
+    <div>
+      <h4 className="font-medium mb-2">Direct API Results:</h4>
+      <ul className="bg-white border rounded p-2">
+        {testResults.map((result, i) => (
+          <li key={i} className="p-2 hover:bg-gray-100">
+            <strong>{result.ticker}</strong> 
+            {result.name || result.company_name ? ` - ${result.name || result.company_name}` : ''}
+            {typeof result.price === 'number' ? ` - $${result.price.toFixed(2)}` : ''}
+          </li>
+        ))}
+      </ul>
+    </div>
+  ) : (
+    !testLoading && <p className="text-gray-500">No results found directly from API</p>
+  )}
+</div>
 
       {/* Portfolio Dashboard */}
       {loading ? (
@@ -1521,7 +1768,10 @@ const handleBulkUpload = async () => {
                     src={getInstitutionLogo(account.institution)} 
                     alt={account.institution} 
                     className="w-6 h-6 object-contain mr-2"
-                    onError={(e) => e.target.src = "https://via.placeholder.com/24"}
+                    onError={(e) => {
+                      // Use a data URI instead of placeholder.com
+                      e.target.src = "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiBmaWxsPSIjZTJlOGYwIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtc2l6ZT0iMTIiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGFsaWdubWVudC1iYXNlbGluZT0ibWlkZGxlIiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZmlsbD0iIzk0YTNiOCI+PzwvdGV4dD48L3N2Zz4=";
+                    }}
                   />
                 ) : account.institution && (
                   <div className="w-6 h-6 rounded-full bg-gray-200 flex items-center justify-center mr-2 text-xs font-medium">
@@ -2037,39 +2287,39 @@ const handleBulkUpload = async () => {
             className="modal-input"
             required
           />
-          {searchResults.length > 0 && (
-            <div className="search-results absolute left-0 right-0 bg-white border border-gray-300 mt-1 max-h-60 overflow-y-auto rounded-md shadow-lg z-10">
-              {searchResults.map((result) => (
-                <div 
-                  key={result.ticker} 
-                  className="search-result-item p-2 hover:bg-gray-100 cursor-pointer flex justify-between items-center border-b border-gray-200"
-                  onClick={() => {
-                    setSecuritySearch(result.ticker);
-                    setSecurityPrice(result.price);
-                    setSearchResults([]);
-                  }}
-                >
-                  <div>
-                    <div className="font-bold">{result.ticker}</div>
-                    <div className="text-sm text-gray-600">{result.name}</div>
-                    {result.sector && (
-                      <div className="text-xs text-gray-500">
-                        {result.sector} • {result.industry}
-                      </div>
-                    )}
+            {searchResults.length > 0 && (
+              <div className="search-results absolute left-0 right-0 bg-white border border-gray-300 mt-1 max-h-60 overflow-y-auto rounded-md shadow-lg z-10">
+                {searchResults.map((result) => (
+                  <div 
+                    key={result.ticker} 
+                    className="search-result-item p-3 hover:bg-gray-100 cursor-pointer flex justify-between items-center border-b border-gray-200"
+                    onClick={() => {
+                      setSecuritySearch(result.ticker);
+                      setSecurityPrice(result.price || 0);
+                      setSearchResults([]);
+                    }}
+                  >
+                    <div>
+                      <div className="font-bold text-blue-800">{result.ticker}</div>
+                      <div className="text-sm text-gray-700">{result.name}</div>
+                      {result.sector && (
+                        <div className="text-xs text-gray-500">
+                          {result.sector} {result.industry ? `• ${result.industry}` : ''}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex flex-col items-end">
+                      <div className="text-sm font-semibold">${(result.price || 0).toFixed(2)}</div>
+                      {typeof result.market_cap === 'number' && result.market_cap > 0 && (
+                        <div className="text-xs text-gray-500">
+                          Market Cap: ${(result.market_cap / 1_000_000_000).toFixed(1)}B
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex flex-col items-end">
-                    <div className="text-sm font-semibold">${result.price.toFixed(2)}</div>
-                    {result.marketCap && (
-                      <div className="text-xs text-gray-500">
-                        Market Cap: ${(result.marketCap / 1_000_000_000).toFixed(1)}B
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+                ))}
+              </div>
+            )}
         </div>
         
         {securitySearch && (

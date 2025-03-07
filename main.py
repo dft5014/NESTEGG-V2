@@ -512,7 +512,36 @@ async def delete_position(position_id: int, current_user: dict = Depends(get_cur
 async def search_securities(query: str, current_user: dict = Depends(get_current_user)):
     """Search securities from the database"""
     try:
-        # Case-insensitive search across ticker, company name, sector, and industry
+        # Log the request
+        logger.info(f"Securities search request received: query='{query}'")
+        
+        # Check if the query is actually reaching the endpoint
+        # Execute a direct check against the database
+        check_query = """
+        SELECT 
+            ticker, 
+            company_name 
+        FROM securities 
+        WHERE LOWER(ticker) LIKE LOWER(:pattern)
+        LIMIT 5
+        """
+        check_pattern = f"%{query}%"
+        check_results = await database.fetch_all(check_query, {"pattern": check_pattern})
+        
+        # Log what we found directly
+        logger.info(f"Direct DB check results: {[dict(row) for row in check_results]}")
+        
+       # Input validation - ensure query has content
+        if not query or len(query.strip()) < 1:
+            return {"results": []}
+        
+        # Add debug logging
+        logger.info(f"Securities search request: query='{query}'")
+        
+        # Fix: Properly format the search pattern with wildcards
+        search_pattern = f"%{query}%"
+        
+        # Case-insensitive search with proper parameter binding
         search_query = """
         SELECT 
             ticker, 
@@ -534,36 +563,41 @@ async def search_securities(query: str, current_user: dict = Depends(get_current
         FROM securities
         WHERE 
             (
-                LOWER(ticker) LIKE LOWER(:query) OR 
-                LOWER(company_name) LIKE LOWER(:query) OR 
-                LOWER(sector) LIKE LOWER(:query) OR 
-                LOWER(industry) LIKE LOWER(:query)
+                LOWER(ticker) LIKE LOWER(:search_pattern) OR 
+                LOWER(company_name) LIKE LOWER(:search_pattern) OR 
+                LOWER(COALESCE(sector, '')) LIKE LOWER(:search_pattern) OR 
+                LOWER(COALESCE(industry, '')) LIKE LOWER(:search_pattern)
             )
         ORDER BY 
             CASE 
                 WHEN LOWER(ticker) = LOWER(:exact_match) THEN 0
                 WHEN LOWER(ticker) LIKE LOWER(:starts_with) THEN 1
-                ELSE 2
+                WHEN LOWER(company_name) LIKE LOWER(:starts_with) THEN 2
+                ELSE 3
             END,
-            market_cap DESC NULLS LAST
-        LIMIT 10
+            market_cap DESC NULLS LAST,
+            ticker ASC
+        LIMIT 20
         """
         
-        # Use % for LIKE pattern matching
-        search_param = f"%{query}%"
-        exact_match = query.lower()
-        starts_with = f"{query.lower()}%"
+        # Fix: Ensure parameter names match between query and params object
+        params = {
+            "search_pattern": search_pattern,  # This matches the :search_pattern in the query
+            "exact_match": query.lower(),
+            "starts_with": f"{query.lower()}%"
+        }
         
-        results = await database.fetch_all(
-            search_query, 
-            {
-                "query": search_param,
-                "exact_match": exact_match,
-                "starts_with": starts_with
-            }
-        )
+        # Debug the final query and parameters
+        logger.info(f"Executing search with params: {params}")
         
-        # Convert to list of dicts and ensure numeric values are properly handled
+        # Execute the query with correctly named parameters
+        results = await database.fetch_all(search_query, params)
+        
+        # Debug the result count
+        result_count = len(results) if results else 0
+        logger.info(f"Search for '{query}' found {result_count} results")
+        
+        # Format results
         formatted_results = []
         for row in results:
             result_dict = dict(row)
@@ -587,7 +621,11 @@ async def search_securities(query: str, current_user: dict = Depends(get_current
         return {"results": formatted_results}
     
     except Exception as e:
-        logger.error(f"Error searching securities: {str(e)}")
+        # Enhanced error logging
+        logger.error(f"Error in securities search: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
             detail=f"Failed to search securities: {str(e)}"
