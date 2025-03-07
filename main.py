@@ -510,126 +510,79 @@ async def delete_position(position_id: int, current_user: dict = Depends(get_cur
 
 @app.get("/securities/search")
 async def search_securities(query: str, current_user: dict = Depends(get_current_user)):
-    """Search securities from the database"""
+    """Search securities from the database."""
     try:
-        # Log the request
+        logger.info(f"Authenticated user: {current_user}")
         logger.info(f"Securities search request received: query='{query}'")
         
-        # Check if the query is actually reaching the endpoint
-        # Execute a direct check against the database
-        check_query = """
-        SELECT 
-            ticker, 
-            company_name 
-        FROM securities 
-        WHERE LOWER(ticker) LIKE LOWER(:pattern)
-        LIMIT 5
-        """
-        check_pattern = f"%{query}%"
-        check_results = await database.fetch_all(check_query, {"pattern": check_pattern})
-        
-        # Log what we found directly
-        logger.info(f"Direct DB check results: {[dict(row) for row in check_results]}")
-        
-       # Input validation - ensure query has content
         if not query or len(query.strip()) < 1:
             return {"results": []}
-        
-        # Add debug logging
-        logger.info(f"Securities search request: query='{query}'")
-        
-        # Fix: Properly format the search pattern with wildcards
-        search_pattern = f"%{query}%"
-        
-        # Case-insensitive search with proper parameter binding
+
+        search_pattern = f"%{query.strip().lower()}%"
+        params = {
+            "search_pattern": search_pattern
+        }
+        logger.info(f"Executing search with params: {params}")
+
+        # Query matching the schema
         search_query = """
         SELECT 
-            ticker, 
-            company_name AS name, 
+            ticker,
+            company_name AS name,
             COALESCE(current_price, 0) AS price,
             sector,
             industry,
-            market_cap,
-            volume,
-            pe_ratio,
-            day_high,
-            day_low,
-            day_open,
-            previous_close,
-            fifty_two_week_high,
-            fifty_two_week_low,
-            dividend_yield,
-            last_updated
+            market_cap
         FROM securities
-        WHERE 
-            (
-                LOWER(ticker) LIKE LOWER(:search_pattern) OR 
-                LOWER(company_name) LIKE LOWER(:search_pattern) OR 
-                LOWER(COALESCE(sector, '')) LIKE LOWER(:search_pattern) OR 
-                LOWER(COALESCE(industry, '')) LIKE LOWER(:search_pattern)
-            )
-        ORDER BY 
-            CASE 
-                WHEN LOWER(ticker) = LOWER(:exact_match) THEN 0
-                WHEN LOWER(ticker) LIKE LOWER(:starts_with) THEN 1
-                WHEN LOWER(company_name) LIKE LOWER(:starts_with) THEN 2
-                ELSE 3
-            END,
-            market_cap DESC NULLS LAST,
-            ticker ASC
+            WHERE 
+                TRIM(LOWER(ticker)) LIKE :search_pattern OR
+                TRIM(LOWER(company_name)) LIKE :search_pattern OR
+                TRIM(LOWER(COALESCE(sector, ''))) LIKE :search_pattern OR
+                TRIM(LOWER(COALESCE(industry, ''))) LIKE :search_pattern
+
+        ORDER BY ticker ASC
         LIMIT 20
         """
-        
-        # Fix: Ensure parameter names match between query and params object
-        params = {
-            "search_pattern": search_pattern,  # This matches the :search_pattern in the query
-            "exact_match": query.lower(),
-            "starts_with": f"{query.lower()}%"
-        }
-        
-        # Debug the final query and parameters
-        logger.info(f"Executing search with params: {params}")
-        
-        # Execute the query with correctly named parameters
+
+        compiled_query = search_query.replace(":search_pattern", f"'{search_pattern}'")
+        logger.info(f"Compiled query: {compiled_query}")
+
         results = await database.fetch_all(search_query, params)
-        
-        # Debug the result count
         result_count = len(results) if results else 0
-        logger.info(f"Search for '{query}' found {result_count} results")
-        
-        # Format results
-        formatted_results = []
-        for row in results:
-            result_dict = dict(row)
-            
-            # Format timestamp
-            if result_dict.get("last_updated"):
-                result_dict["last_updated"] = result_dict["last_updated"].isoformat()
-                
-            # Ensure numeric values are properly cast
-            for field in ["price", "market_cap", "pe_ratio", "day_high", "day_low", 
-                         "day_open", "previous_close", "fifty_two_week_high", 
-                         "fifty_two_week_low", "dividend_yield"]:
-                if field in result_dict and result_dict[field] is not None:
-                    try:
-                        result_dict[field] = float(result_dict[field])
-                    except (TypeError, ValueError):
-                        result_dict[field] = 0
-            
-            formatted_results.append(result_dict)
-        
+        logger.info(f"Search for '{query}' found {result_count} results: {results}")
+
+        formatted_results = [dict(row) for row in results]
         return {"results": formatted_results}
-    
+
     except Exception as e:
-        # Enhanced error logging
         logger.error(f"Error in securities search: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
-        
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to search securities: {str(e)}"
         )
+        
+
+@app.get("/securities/all")
+async def get_all_securities(current_user: dict = Depends(get_current_user)):
+    """Retrieve all securities from the database for debugging purposes."""
+    try:
+        logger.info(f"Authenticated user: {current_user}")
+        logger.info("Fetching all securities from the database")
+        query = "SELECT ticker FROM securities ORDER BY ticker ASC LIMIT 50"  # Increased limit
+        results = await database.fetch_all(query)
+        result_count = len(results) if results else 0
+        logger.info(f"Fetched {result_count} securities from the database: {results}")
+        return {"securities": [dict(row) for row in results]}
+    except Exception as e:
+        logger.error(f"Error fetching all securities: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch securities: {str(e)}"
+        )   
 
 # Portfolio Summary
 @app.get("/portfolio/summary")

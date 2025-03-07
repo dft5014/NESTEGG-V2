@@ -642,6 +642,7 @@ const handleTestSearch = async () => {
 };
 
 // Enhanced searchSecurities function
+// Enhanced searchSecurities function
 const searchSecurities = async (query) => {
   if (!query || query.length < 1) {
     setSearchResults([]);
@@ -822,6 +823,7 @@ const handleEditAccount = async (e) => {
 };
 
 // diagnostic 
+// Add this diagnostic function to help with debugging
 const runSecuritiesTest = async () => {
   console.group("Securities Search Diagnostic");
   
@@ -968,29 +970,26 @@ const debugSearchProcess = async (query) => {
 
 
   // Handle security search and get placeholder price
-  const handleSecuritySearch = async (value) => {
-    setSecuritySearch(value);
-    
-    if (value.length >= 2) {
-      if (value === "DEBUG") {
-        await debugSearchProcess("APP"); // Test with a common prefix
-        return;
-      }    
-      try {
-        const results = await searchSecurities(value);
+// Update the handleSecuritySearch function
+const handleSecuritySearch = async (value) => {
+  setSecuritySearch(value);
+  
+  if (value.length >= 2) {
+    try {
+      const results = await searchSecurities(value);
       
-        // If we got a result, use the first one's price
-        if (results.length > 0) {
-          setSecurityPrice(results[0].price || 0);
-        }
-      } catch (error) {
-        console.error("Error in security search:", error);
-        setFormMessage(`Security search error: ${error.message}`);
+      // If we got a result, use the first one's price
+      if (results.length > 0) {
+        setSecurityPrice(results[0].price || 0);
       }
-    } else {
-      setSearchResults([]);
+    } catch (error) {
+      console.error("Error in security search:", error);
+      setFormMessage(`Security search error: ${error.message}`);
     }
-  };
+  } else {
+    setSearchResults([]);
+  }
+};
     
   // Handle submitting a new security position
   const handleAddSecurity = async () => {

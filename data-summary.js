@@ -580,14 +580,14 @@ export default function DataSummary() {
                     </div>
                   </th>
                   <th
-                    className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
-                    onClick={() => requestSort('avg_volume')}
+                    className="px-3 py-4 whitespace-nowrap text-right text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                    onClick={() => requestSort('volume')}
                   >
                     <div className="flex items-center justify-end">
                       <BarChart2 className="w-4 h-4 mr-1" />
                       <span>Volume</span>
                       <ArrowUpDown className="w-4 h-4 ml-1" />
-                      {getSortIndicator('avg_volume')}
+                      {getSortIndicator('volume')}
                     </div>
                   </th>
                   <th
@@ -664,7 +664,7 @@ export default function DataSummary() {
                       </td>
                       <td className="px-3 py-4 whitespace-nowrap text-right">
                         <div className="text-sm text-gray-900">
-                          {typeof security.avg_volume === 'number' ? formatNumber(security.avg_volume) : '-'}
+                          {typeof security.volume === 'number' ? formatNumber(security.volume) : '-'}
                         </div>
                       </td>
                       <td className="px-3 py-4 whitespace-nowrap text-right">
