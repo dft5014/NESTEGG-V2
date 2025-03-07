@@ -5551,3 +5551,14 @@ DETAIL:  Key (ticker, "timestamp")=(MO, 2025-03-01 03:42:11.718768+00) already e
 2025-03-06 16:31:36,890 - yfinance - ERROR - ['NWL']: ReadTimeout(ReadTimeoutError("HTTPSConnectionPool(host='query2.finance.yahoo.com', port=443): Read timed out. (read timeout=10)"))
 2025-03-06 16:31:36,898 - price_updater - WARNING - Marking ticker NWL as unavailable on YFinance
 2025-03-06 16:40:28,914 - price_updater - ERROR - Error updating recent history for EIX: connection was closed in the middle of operation
+2025-03-06 16:50:18,036 - databases - INFO - Disconnected from database postgresql://postgres:********@db.vdkxhhukhjjwcjkjtcpw.supabase.co:5432/postgres?sslmode=require
+2025-03-06 16:50:18,045 - price_updater - INFO - Performing historical backfill for 3 tickers
+2025-03-06 16:50:20,754 - databases - INFO - Connected to database postgresql://postgres:********@db.vdkxhhukhjjwcjkjtcpw.supabase.co:5432/postgres?sslmode=require
+2025-03-06 16:51:48,643 - price_updater - INFO - Completed historical backfill for APH
+2025-03-06 16:51:50,242 - price_updater - ERROR - Error updating metrics for APH: column "avg_volume" of relation "securities" does not exist
+2025-03-06 16:53:20,743 - price_updater - INFO - Completed historical backfill for IUSV
+2025-03-06 16:53:21,170 - price_updater - ERROR - Error updating metrics for IUSV: column "avg_volume" of relation "securities" does not exist
+2025-03-06 16:54:50,292 - price_updater - INFO - Completed historical backfill for ET
+2025-03-06 16:54:50,667 - price_updater - ERROR - Error updating metrics for ET: column "avg_volume" of relation "securities" does not exist
+2025-03-06 16:54:57,763 - databases - INFO - Disconnected from database postgresql://postgres:********@db.vdkxhhukhjjwcjkjtcpw.supabase.co:5432/postgres?sslmode=require
+2025-03-06 16:54:57,765 - price_updater - INFO - Smart market update completed

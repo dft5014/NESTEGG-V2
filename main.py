@@ -520,25 +520,71 @@ async def search_securities(query: str, current_user: dict = Depends(get_current
             COALESCE(current_price, 0) AS price,
             sector,
             industry,
-            market_cap
+            market_cap,
+            volume,
+            pe_ratio,
+            day_high,
+            day_low,
+            day_open,
+            previous_close,
+            fifty_two_week_high,
+            fifty_two_week_low,
+            dividend_yield,
+            last_updated
         FROM securities
         WHERE 
-            active = true AND 
             (
                 LOWER(ticker) LIKE LOWER(:query) OR 
                 LOWER(company_name) LIKE LOWER(:query) OR 
                 LOWER(sector) LIKE LOWER(:query) OR 
                 LOWER(industry) LIKE LOWER(:query)
             )
+        ORDER BY 
+            CASE 
+                WHEN LOWER(ticker) = LOWER(:exact_match) THEN 0
+                WHEN LOWER(ticker) LIKE LOWER(:starts_with) THEN 1
+                ELSE 2
+            END,
+            market_cap DESC NULLS LAST
         LIMIT 10
         """
         
         # Use % for LIKE pattern matching
         search_param = f"%{query}%"
+        exact_match = query.lower()
+        starts_with = f"{query.lower()}%"
         
-        results = await database.fetch_all(search_query, {"query": search_param})
+        results = await database.fetch_all(
+            search_query, 
+            {
+                "query": search_param,
+                "exact_match": exact_match,
+                "starts_with": starts_with
+            }
+        )
         
-        return {"results": [dict(result) for result in results]}
+        # Convert to list of dicts and ensure numeric values are properly handled
+        formatted_results = []
+        for row in results:
+            result_dict = dict(row)
+            
+            # Format timestamp
+            if result_dict.get("last_updated"):
+                result_dict["last_updated"] = result_dict["last_updated"].isoformat()
+                
+            # Ensure numeric values are properly cast
+            for field in ["price", "market_cap", "pe_ratio", "day_high", "day_low", 
+                         "day_open", "previous_close", "fifty_two_week_high", 
+                         "fifty_two_week_low", "dividend_yield"]:
+                if field in result_dict and result_dict[field] is not None:
+                    try:
+                        result_dict[field] = float(result_dict[field])
+                    except (TypeError, ValueError):
+                        result_dict[field] = 0
+            
+            formatted_results.append(result_dict)
+        
+        return {"results": formatted_results}
     
     except Exception as e:
         logger.error(f"Error searching securities: {str(e)}")
